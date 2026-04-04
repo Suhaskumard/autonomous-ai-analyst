@@ -21,7 +21,7 @@ Experience real-time transparency during data crunching.
 - **Live Terminal Specs:** A simulated streaming log feed outputs internal model variations (e.g., `Training RandomForest... Accuracy: 78% → 85%`).
 
 ### 💡 3. Smart Recommendation Engine
-Proactive, data-driven suggestions rendered straight to the dashboard.
+Proactive, data-driven suggestions rendered straight to the dashboard. 
 - Identifies missing value anomalies.
 - Recommends algorithm swaps (e.g., suggesting XGBoost for potential accuracy bumps).
 
