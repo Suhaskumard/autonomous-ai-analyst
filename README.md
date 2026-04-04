@@ -106,7 +106,7 @@ autonomous-ai-analyst/
 cd frontend
 npm run build    # Creates /dist folder
 # Serve dist/ with nginx/Vercel/Netlify
-```
+```  
 
 ## 🐛 Troubleshooting
 - **Port conflicts**: Change `--port 8000` or kill processes on ports.
