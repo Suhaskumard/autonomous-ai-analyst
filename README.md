@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/Python-14354C?style=for-the-badge&logo=python&logoColor=white" />
 </p>
 
-An intelligent, full-stack data analytics platform that acts as an autonomous AI companion. It transcends traditional dashboards by providing live analysis, AI-driven conversational insights, and smart data recommendations.
+An intelligent, full-stack data analytics platform that acts as an autonomous AI companion. It transcends traditional dashboards by providing live analysis, AI-driven conversational insights, and smart data recommendations. 
 
 ## ✨ High-Impact Features
 
