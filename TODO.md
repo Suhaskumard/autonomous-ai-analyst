@@ -5,7 +5,7 @@
 ### 1. Update frontend/src/pages/SettingsPage.jsx ✅
 - [x] Added `const stripeKey = process.env.REACT_APP_STRIPE_KEY || '••••••••••••••••••••••••';`
 - [x] Replaced hardcoded display with `stripeKey` logic (hardcoded secret removed)
- 
+  
 ### 2. Update frontend/.gitignore ✅
 - [x] Added `.env`, `.env.local`, `.env.*.local`
 
