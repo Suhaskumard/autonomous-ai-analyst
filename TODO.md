@@ -13,7 +13,7 @@
 - [x] `REACT_APP_STRIPE_KEY=` 
 - [x] `.env.local` for local keys 
 
-### 4. Git cleanup & push
+### 4. Git cleanup & push 
 - [ ] `git rm --cached frontend/src/pages/SettingsPage.jsx`
 - [ ] `git add .`
 - [ ] `git commit -m "Remove hardcoded Stripe key, add env support"`
