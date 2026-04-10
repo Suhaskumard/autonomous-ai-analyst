@@ -11,7 +11,7 @@
 
 ### 3. Create frontend/.env ✅
 - [x] `REACT_APP_STRIPE_KEY=` 
-- [x] `.env.local` for local keys
+- [x] `.env.local` for local keys 
 
 ### 4. Git cleanup & push
 - [ ] `git rm --cached frontend/src/pages/SettingsPage.jsx`
