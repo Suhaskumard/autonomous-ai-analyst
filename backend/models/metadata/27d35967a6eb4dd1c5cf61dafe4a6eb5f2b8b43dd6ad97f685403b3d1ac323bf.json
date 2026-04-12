@@ -1,0 +1,341 @@
+{
+  "dataset_hash": "27d35967a6eb4dd1c5cf61dafe4a6eb5f2b8b43dd6ad97f685403b3d1ac323bf",
+  "problem_type": "classification",
+  "mode": "auto",
+  "selected_model": "DecisionTree",
+  "all_model_scores": {
+    "RandomForest": {
+      "accuracy": 0.011703511053315995,
+      "precision": 0.0003837592987390402,
+      "recall": 0.011703511053315995
+    },
+    "DecisionTree": {
+      "accuracy": 0.017165149544863458,
+      "precision": 0.009046643148231002,
+      "recall": 0.017165149544863458
+    }
+  },
+  "features": [
+    "Reference ID",
+    "Report Year",
+    "Diagnosis Category",
+    "Diagnosis Sub Category",
+    "Treatment Category",
+    "Treatment Sub Category",
+    "Determination",
+    "Type",
+    "Age Range",
+    "Patient Gender"
+  ],
+  "target": "Findings",
+  "failed_models": {
+    "LogisticRegression": "Unable to allocate 1.67 GiB for an array with shape (15380, 14555) and data type float64",
+    "XGBoost": "Invalid classes inferred from unique values of `y`.  Expected: [    0     1     2 ... 14552 14553 14554], got ['.'\n '35-year-old female enrollee has requested mental health outpatient treatments at a frequency of three times per week for'\n '47-year-old female enrollee requested infusion medication (ceftriaxone) for treatment of her medical condition. Findings'\n ...\n 'a 48-year-old female enrollee requested authorization and coverage of gastric bypass surgery for the treatment of morbid'\n 'ature of Statutory Criteria/Case Summary: An enrollee has requested OxyContin for treatment of her sarcoidosis. Findings'\n 'female enrollee requested lymphedema drainage therapy with the use of low-level laser instrument LTU 904 for medical tre']"
+  },
+  "timestamp": "2026-04-12T16:17:45Z",
+  "data_snapshot_path": "C:\\Users\\Madhavi\\OneDrive\\Desktop\\Al analyst\\backend\\models\\metadata\\27d35967a6eb4dd1c5cf61dafe4a6eb5f2b8b43dd6ad97f685403b3d1ac323bf_data.csv",
+  "quality_report": {
+    "rows": 19245,
+    "columns": 11,
+    "missing_counts": {
+      "Reference ID": 0,
+      "Report Year": 0,
+      "Diagnosis Category": 59,
+      "Diagnosis Sub Category": 1904,
+      "Treatment Category": 450,
+      "Treatment Sub Category": 1268,
+      "Determination": 0,
+      "Type": 0,
+      "Age Range": 1210,
+      "Patient Gender": 1210,
+      "Findings": 20
+    },
+    "duplicate_rows": 0,
+    "warnings": []
+  },
+  "charts": {
+    "numeric_histograms": {
+      "Report Year": {
+        "labels": [
+          "(2000.984, 2002.5]",
+          "(2002.5, 2004.0]",
+          "(2004.0, 2005.5]",
+          "(2005.5, 2007.0]",
+          "(2007.0, 2008.5]",
+          "(2008.5, 2010.0]",
+          "(2010.0, 2011.5]",
+          "(2011.5, 2013.0]",
+          "(2013.0, 2014.5]",
+          "(2014.5, 2016.0]"
+        ],
+        "counts": [
+          1242,
+          1517,
+          965,
+          2425,
+          1519,
+          2883,
+          1445,
+          2428,
+          1432,
+          3389
+        ]
+      }
+    },
+    "categorical_bars": {
+      "Reference ID": {
+        "labels": [
+          "MN16-22639",
+          "MN16-22638",
+          "MN16-22637",
+          "EI16-22636",
+          "EI06-5319",
+          "EI16-22635",
+          "EI16-22634",
+          "EI16-22633",
+          "MN16-22632",
+          "EI16-22158"
+        ],
+        "counts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "Diagnosis Category": {
+        "labels": [
+          "Orthopedic/ Musculoskeletal",
+          "Mental",
+          "Cancer",
+          "Central Nervous System/ Neuromuscular",
+          "Infectious",
+          "Cardiac/Circulatory",
+          "Morbid Obesity",
+          "OB-Gyn/ Pregnancy",
+          "Endocrine/ Metabolic",
+          "Digestive System/ Gastrointestinal"
+        ],
+        "counts": [
+          3469,
+          2512,
+          1681,
+          1620,
+          1059,
+          965,
+          824,
+          801,
+          779,
+          758
+        ]
+      },
+      "Diagnosis Sub Category": {
+        "labels": [
+          "Other",
+          "Hepatitis",
+          "Back Pain",
+          "Vertebral Disc Problem",
+          "Autism-PDD-NOS",
+          "Breast Cancer",
+          "Delayed Speech",
+          "Osteoarthritis",
+          "Eating Disorder",
+          "Depression"
+        ],
+        "counts": [
+          3991,
+          791,
+          688,
+          477,
+          442,
+          404,
+          363,
+          346,
+          305,
+          294
+        ]
+      },
+      "Treatment Category": {
+        "labels": [
+          "Pharmacy/Prescription Drugs",
+          "Diagnostic Imaging, Screening and Testing",
+          "Mental Health Treatment",
+          "Durable Medical Equipment",
+          "General Surgery",
+          "Orthopedic",
+          "Rehabilitation Services - Outpatient",
+          "Cancer Treatment",
+          "Electrical/ Thermal/ Radiofreq. Interventions",
+          "Reconstructive/Plastic Surgery"
+        ],
+        "counts": [
+          4595,
+          2436,
+          1760,
+          1374,
+          1043,
+          964,
+          955,
+          813,
+          704,
+          628
+        ]
+      },
+      "Treatment Sub Category": {
+        "labels": [
+          "Other",
+          "Speech Therapy",
+          "Anti-virals",
+          "Residential Treatment Center - Admission",
+          "MRI",
+          "Hormones",
+          "Non-FDA Approved Use",
+          "Emergency Room",
+          "Botox Injection",
+          "Acute Psychiatric Facility Admission"
+        ],
+        "counts": [
+          4822,
+          790,
+          755,
+          611,
+          550,
+          404,
+          381,
+          353,
+          334,
+          291
+        ]
+      }
+    }
+  },
+  "feature_importance": [
+    {
+      "feature": "Reference ID",
+      "importance": 0.1362318986442806
+    },
+    {
+      "feature": "Diagnosis Category",
+      "importance": 0.0025578315711441615
+    },
+    {
+      "feature": "Report Year",
+      "importance": 0.0
+    },
+    {
+      "feature": "Diagnosis Sub Category",
+      "importance": 0.0
+    },
+    {
+      "feature": "Treatment Category",
+      "importance": 0.0
+    },
+    {
+      "feature": "Treatment Sub Category",
+      "importance": 0.0
+    },
+    {
+      "feature": "Determination",
+      "importance": 0.0
+    },
+    {
+      "feature": "Type",
+      "importance": 0.0
+    },
+    {
+      "feature": "Age Range",
+      "importance": 0.0
+    },
+    {
+      "feature": "Patient Gender",
+      "importance": 0.0
+    }
+  ],
+  "insights": [
+    "Target column automatically detected as 'Findings'.",
+    "Problem type detected as classification.",
+    "Training mode used: auto.",
+    "Models trained: RandomForest, DecisionTree.",
+    "Removed 20 rows because target value was missing.",
+    "Top influencing feature: Reference ID.",
+    "Skipped models due to training errors: LogisticRegression, XGBoost.",
+    "Parsing note: Auto-detected delimiter and skipped malformed CSV rows when needed."
+  ],
+  "summary_stats": {
+    "Reference ID": {
+      "type": "categorical",
+      "most_frequent": "MN16-22639",
+      "unique_count": 19245,
+      "null_count": 0
+    },
+    "Report Year": {
+      "type": "numeric",
+      "mean": 2009.6629773967263,
+      "median": 2010.0,
+      "min": 2001.0,
+      "max": 2016.0,
+      "std": 4.272044880351378,
+      "null_count": 0
+    },
+    "Diagnosis Category": {
+      "type": "categorical",
+      "most_frequent": "Orthopedic/ Musculoskeletal",
+      "unique_count": 29,
+      "null_count": 59
+    },
+    "Diagnosis Sub Category": {
+      "type": "categorical",
+      "most_frequent": "Other",
+      "unique_count": 278,
+      "null_count": 1904
+    },
+    "Treatment Category": {
+      "type": "categorical",
+      "most_frequent": "Pharmacy/Prescription Drugs",
+      "unique_count": 31,
+      "null_count": 450
+    },
+    "Treatment Sub Category": {
+      "type": "categorical",
+      "most_frequent": "Other",
+      "unique_count": 283,
+      "null_count": 1268
+    },
+    "Determination": {
+      "type": "categorical",
+      "most_frequent": "Upheld Decision of Health Plan",
+      "unique_count": 2,
+      "null_count": 0
+    },
+    "Type": {
+      "type": "categorical",
+      "most_frequent": "Medical Necessity",
+      "unique_count": 3,
+      "null_count": 0
+    },
+    "Age Range": {
+      "type": "categorical",
+      "most_frequent": "51-64",
+      "unique_count": 7,
+      "null_count": 1210
+    },
+    "Patient Gender": {
+      "type": "categorical",
+      "most_frequent": "Female",
+      "unique_count": 2,
+      "null_count": 1210
+    },
+    "Findings": {
+      "type": "categorical",
+      "most_frequent": "Nature of Statutory Criteria/Case Summary: An enrollee has requested breast tomosynthesis for evaluation of her medical ",
+      "unique_count": 18127,
+      "null_count": 20
+    }
+  }
+}
