@@ -55,11 +55,17 @@ frontend/
 2. Create and activate a virtual environment.
 3. Install dependencies: `pip install -r requirements.txt`.
 4. **Configure Environment Variables**:
+   - Create a `.env` file in the `backend/` directory.
+   - Add your Gemini API Key:
+     ```env
+     GEMINI_API_KEY="your_api_key_here"
+     GEMINI_MODEL="gemini-1.5-flash-8b"  # Recommended for best availability
+     ```
+5. **Verify Connection**:
    ```bash
-   export GEMINI_API_KEY="your_api_key"
-   export GEMINI_MODEL="gemini-1.5-flash"
+   python scratch/test_gemini.py
    ```
-5. Run the server: `uvicorn main:app --reload`.
+6. Run the server: `uvicorn main:app --reload`.
 
 ### 2. Setup Frontend
 1. Navigate to `frontend/`.
