@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Env files
+.env
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Vite cache
+.vite/
+
+# Scratch/temp
+backend/scratch/
+
+# OS
+.DS_Store
+Thumbs.db

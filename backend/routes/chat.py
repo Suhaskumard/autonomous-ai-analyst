@@ -6,6 +6,9 @@ from google.genai import types
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from utils.helpers import METADATA_DIR
 
@@ -50,7 +53,8 @@ def chat(req: ChatRequest):
             },
         }
 
-    model_id = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    # Default to gemini-1.5-flash-8b if nothing is specified, as it has better availability.
+    model_id = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-8b")
 
     # Prepare context
     summary_stats = metadata.get("summary_stats", {})
