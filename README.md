@@ -16,7 +16,7 @@ An enterprise-grade, full-stack autonomous data science system. It automatically
   - Modern **Glassmorphic** UI with a sophisticated dark-mode aesthetic.
   - HSL-tailored color palette with vibrant accents and micro-interactions.
   - Responsive layout with high-performance animations.
-- **Autonomous ML Pipeline**: 
+- **Autonomous ML Pipeline**:  
   - **Zero-touch Preprocessing**: Automatic scaling, encoding, and target detection.
   - **Smart Modeling**: Auto-selection, Ensembling, or Manual fine-tuning.
   - **Explainability**: Integrated SHAP-based feature importance.
