@@ -8,8 +8,8 @@ before it touches a path, and build the path with artifact_path so the result
 is provably under a known root.
 """
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 from fastapi import HTTPException
 

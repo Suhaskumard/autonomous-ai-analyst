@@ -5,6 +5,7 @@ import joblib
 import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
+from exceptions import ArtifactError
 from ml.ensemble import ensemble_predict
 from utils.helpers import METADATA_DIR, MODEL_DIR, read_csv_flexible
 from utils.security import artifact_path, validate_dataset_hash
@@ -42,10 +43,7 @@ async def predict(run_key: str, file: UploadFile = File(...)):
 
     bundle = joblib.load(model_path)
     if not isinstance(bundle, dict) or "pipelines" not in bundle:
-        raise HTTPException(
-            status_code=409,
-            detail="Stored artifact predates the current pipeline. Re-upload the dataset to retrain.",
-        )
+        raise ArtifactError("Stored artifact predates the current pipeline. Re-upload the dataset to retrain.")
 
     stored = await read_upload_to_temp(file)
     try:

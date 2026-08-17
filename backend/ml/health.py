@@ -56,9 +56,7 @@ def assess_run(
                 "always predicting the most common class."
             )
         if n_classes > 50:
-            reasons.append(
-                f"The target has {n_classes:,} classes, so per-class accuracy is thin by construction."
-            )
+            reasons.append(f"The target has {n_classes:,} classes, so per-class accuracy is thin by construction.")
         if score < 0.5 and n_classes == 2:
             reasons.append("A two-class problem scoring under 50% is worse than a coin flip.")
     else:
@@ -70,14 +68,11 @@ def assess_run(
 
         if not beats_baseline:
             reasons.append(
-                f"RMSE of {score:.4g} is no better than the {baseline:.4g} you get from "
-                "always predicting the mean."
+                f"RMSE of {score:.4g} is no better than the {baseline:.4g} you get from always predicting the mean."
             )
 
     if failed_models:
-        reasons.append(
-            f"{len(failed_models)} model(s) failed to train: {', '.join(failed_models)}."
-        )
+        reasons.append(f"{len(failed_models)} model(s) failed to train: {', '.join(failed_models)}.")
 
     if not beats_baseline:
         verdict = "unreliable"
@@ -88,9 +83,7 @@ def assess_run(
     else:
         verdict = "strong"
         headline = "Model beats the naive baseline"
-        reasons.append(
-            f"Beats the naive baseline by {abs(lift):.4g} on {metric_name}."
-        )
+        reasons.append(f"Beats the naive baseline by {abs(lift):.4g} on {metric_name}.")
 
     return {
         "verdict": verdict,

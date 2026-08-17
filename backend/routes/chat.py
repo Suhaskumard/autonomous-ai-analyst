@@ -13,15 +13,15 @@ import json
 import logging
 import time
 
+from dotenv import load_dotenv
+from fastapi import APIRouter, HTTPException
 from google import genai
 from google.genai import types
-from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import gemini_api_key, gemini_model
+from config import settings
 from utils.helpers import METADATA_DIR
 from utils.security import artifact_path, validate_dataset_hash
 
@@ -59,7 +59,7 @@ class ChatRequest(BaseModel):
 
 
 def _get_gemini_client():
-    api_key = gemini_api_key()
+    api_key = settings.gemini_key
     if not api_key:
         return None
     return genai.Client(api_key=api_key)
@@ -205,7 +205,7 @@ def chat(req: ChatRequest):
             },
         }
 
-    model_id = gemini_model()
+    model_id = settings.gemini_model
     snapshot_path = artifact_path(METADATA_DIR, run_key, "_data.csv")
 
     # Attach the real rows. Files API first; a small snapshot can also ride
@@ -225,9 +225,7 @@ def chat(req: ChatRequest):
             size = snapshot_path.stat().st_size
             if size <= MAX_INLINE_CSV_BYTES:
                 try:
-                    attachment = types.Part.from_bytes(
-                        data=snapshot_path.read_bytes(), mime_type="text/csv"
-                    )
+                    attachment = types.Part.from_bytes(data=snapshot_path.read_bytes(), mime_type="text/csv")
                     attachment_name = "dataset.csv"
                     data_access = "file"
                 except Exception as inline_exc:

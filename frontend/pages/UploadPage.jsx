@@ -3,6 +3,7 @@ import { Layers, Activity, AlertCircle, CheckCircle2 } from "lucide-react";
 import UploadForm from "../components/UploadForm";
 import Dashboard from "../components/Dashboard";
 import ChatBox from "../components/ChatBox";
+import ErrorBoundary from "../components/ErrorBoundary";
 import PredictPanel from "../components/PredictPanel";
 import { chatQuery, getUploadJobStatus, predictDataset, startUploadJob } from "../services/api";
 
@@ -15,7 +16,9 @@ export default function UploadPage() {
 
   const handleSubmit = async (e, mode, manualModel, targetColumn) => {
     e.preventDefault();
-    const file = e.target.file.files[0];
+    // form.elements is the standard accessor; the legacy `form.file`
+    // shorthand is browser-only and absent in jsdom.
+    const file = e.target.elements.file?.files?.[0];
     if (!file) return;
 
     const formData = new FormData();
@@ -125,18 +128,24 @@ export default function UploadPage() {
 
       {result && (
         <div className="fade-in">
-          <Dashboard result={result} />
-          
+          <ErrorBoundary title="The results dashboard could not be displayed">
+            <Dashboard result={result} />
+          </ErrorBoundary>
+
           <div className="grid-2">
             {result.run_key && (
-              <PredictPanel
-                runKey={result.run_key}
-                features={result.features || []}
-                onPredict={predictDataset}
-              />
+              <ErrorBoundary title="The prediction panel could not be displayed">
+                <PredictPanel
+                  runKey={result.run_key}
+                  features={result.features || []}
+                  onPredict={predictDataset}
+                />
+              </ErrorBoundary>
             )}
             {result.run_key && (
-              <ChatBox runKey={result.run_key} onAsk={chatQuery} />
+              <ErrorBoundary title="The analyst chat could not be displayed">
+                <ChatBox runKey={result.run_key} onAsk={chatQuery} />
+              </ErrorBoundary>
             )}
           </div>
         </div>

@@ -15,6 +15,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from exceptions import TargetValidationError
+
 # A categorical feature contributes at most this many one-hot columns; rarer
 # levels are folded into a single "infrequent" column. Without a ceiling, one
 # free-text column explodes into thousands of features and OOMs the fit.
@@ -27,10 +29,6 @@ FREE_TEXT_MEAN_LENGTH = 60
 # A *target* this text-like is refused outright, with an explanation.
 TARGET_MAX_CLASSES = 100
 TARGET_MAX_CLASS_RATIO = 0.5
-
-
-class TargetValidationError(ValueError):
-    """The chosen target cannot be learned. The message is shown to the user."""
 
 
 def detect_target_column(df: pd.DataFrame) -> str:
@@ -48,8 +46,7 @@ def resolve_target_column(df: pd.DataFrame, target_column: str | None) -> tuple[
         if target_column not in df.columns:
             raise TargetValidationError(
                 f"Target column '{target_column}' is not in the dataset. "
-                f"Available columns: {', '.join(map(str, df.columns[:20]))}"
-                + ("..." if len(df.columns) > 20 else "")
+                f"Available columns: {', '.join(map(str, df.columns[:20]))}" + ("..." if len(df.columns) > 20 else "")
             )
         return target_column, False
     return detect_target_column(df), True
@@ -176,8 +173,7 @@ def prepare_dataset(df: pd.DataFrame, target_column: str | None = None) -> dict[
     num_cols, cat_cols, dropped_cols = split_feature_types(X)
     if not num_cols and not cat_cols:
         raise TargetValidationError(
-            "Every feature column looks like free text or a unique identifier, "
-            "so there is nothing usable to train on."
+            "Every feature column looks like free text or a unique identifier, so there is nothing usable to train on."
         )
 
     X = X[num_cols + cat_cols]

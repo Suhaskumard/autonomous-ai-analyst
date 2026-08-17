@@ -6,19 +6,14 @@ the upload to a temp file in fixed-size chunks and refuses the request the
 moment a limit is crossed, so nothing beyond one chunk is ever held in memory.
 """
 
-from hashlib import sha256
-from pathlib import Path
 import os
 import tempfile
+from hashlib import sha256
+from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
 
-from config import (
-    ALLOWED_UPLOAD_CONTENT_TYPES,
-    ALLOWED_UPLOAD_EXTENSIONS,
-    max_upload_bytes,
-    max_upload_rows,
-)
+from config import ALLOWED_UPLOAD_CONTENT_TYPES, ALLOWED_UPLOAD_EXTENSIONS, settings
 
 CHUNK_SIZE = 1024 * 1024
 
@@ -69,14 +64,16 @@ async def read_upload_to_temp(file: UploadFile) -> StoredUpload:
     """Stream `file` to a temp file, enforcing type, byte, and row ceilings."""
     _check_name_and_type(file)
 
-    byte_cap = max_upload_bytes()
-    row_cap = max_upload_rows()
+    byte_cap = settings.max_upload_bytes
+    row_cap = settings.max_upload_rows
 
     digest = sha256()
     total = 0
     newlines = 0
 
-    handle = tempfile.NamedTemporaryFile(prefix="aia_upload_", suffix=".csv", delete=False)
+    # Deliberately not a context manager: the file outlives this function and
+    # is owned by the caller, which closes it via StoredUpload.cleanup().
+    handle = tempfile.NamedTemporaryFile(prefix="aia_upload_", suffix=".csv", delete=False)  # noqa: SIM115
     temp_path = Path(handle.name)
 
     def _abort(status_code: int, detail: str) -> HTTPException:
@@ -107,8 +104,7 @@ async def read_upload_to_temp(file: UploadFile) -> StoredUpload:
             if newlines > row_cap + 2:
                 raise _abort(
                     413,
-                    f"Upload exceeds the {row_cap:,}-row limit. "
-                    "Sample the dataset or raise MAX_UPLOAD_ROWS.",
+                    f"Upload exceeds the {row_cap:,}-row limit. Sample the dataset or raise MAX_UPLOAD_ROWS.",
                 )
 
             digest.update(chunk)

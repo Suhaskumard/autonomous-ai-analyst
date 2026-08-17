@@ -67,9 +67,10 @@ export default function UploadForm({ onSubmit, isLoading }) {
       <form onSubmit={(e) => onSubmit(e, mode, manualModel, targetColumn)}>
         <div className="grid-2">
           <div className="input-group">
-            <label>Dataset File (CSV)</label>
+            <label htmlFor="dataset-file">Dataset File (CSV)</label>
             <div style={{ position: "relative" }}>
               <input
+                id="dataset-file"
                 type="file"
                 name="file"
                 accept=".csv,.tsv,.txt"
@@ -93,9 +94,10 @@ export default function UploadForm({ onSubmit, isLoading }) {
           </div>
 
           <div className="input-group">
-            <label>Training Mode</label>
+            <label htmlFor="training-mode">Training Mode</label>
             <div style={{ position: "relative" }}>
               <select
+                id="training-mode"
                 className="input"
                 value={mode}
                 onChange={(e) => setMode(e.target.value)}
@@ -121,9 +123,10 @@ export default function UploadForm({ onSubmit, isLoading }) {
         </div>
 
         <div className="input-group" style={{ marginTop: "8px" }}>
-          <label>Target Column (what the model should predict)</label>
+          <label htmlFor="target-column">Target Column (what the model should predict)</label>
           <div style={{ position: "relative" }}>
             <select
+              id="target-column"
               className="input"
               value={targetColumn}
               onChange={(e) => setTargetColumn(e.target.value)}
@@ -157,8 +160,9 @@ export default function UploadForm({ onSubmit, isLoading }) {
 
         {mode === "manual" && (
           <div className="input-group fade-in" style={{ marginTop: '8px' }}>
-            <label>Select Model Architecture</label>
+            <label htmlFor="manual-model">Select Model Architecture</label>
             <select
+              id="manual-model"
               className="input"
               value={manualModel}
               onChange={(e) => setManualModel(e.target.value)}

@@ -1,0 +1,50 @@
+[project]
+name = "autonomous-ai-analyst"
+version = "2.0.0"
+description = "Autonomous AI Analyst — FastAPI + scikit-learn backend"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:shap.*",
+    "ignore::FutureWarning:sklearn.*",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["backend/scratch", "frontend", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # import sorting
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "DTZ", # naive datetimes — the bug this phase removed
+    "SIM", # simplifications
+]
+ignore = [
+    "E501",   # line length is enforced by the formatter
+    "B008",   # FastAPI's Depends()/File() defaults are the documented idiom
+    "SIM105", # contextlib.suppress is not clearer for one-line cleanup
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Routes import for side effects after load_dotenv(); tests assert on internals.
+"backend/main.py" = ["E402"]
+"backend/routes/chat.py" = ["E402"]
+"backend/tests/*" = ["B017", "E402"]
+
+[tool.ruff.lint.isort]
+# backend/ is the import root at runtime (uvicorn runs from inside it), so
+# these are first-party even though there is no top-level package directory.
+known-first-party = ["config", "db", "exceptions", "logging_config", "main", "ml", "routes", "tests", "utils"]
+
+[tool.ruff.format]
+quote-style = "double"

@@ -1,4 +1,7 @@
-const API_BASE = "http://localhost:8000/api";
+// Configured at build time. In dev, "/api" is proxied to the backend by
+// vite.config.js; in the container it is proxied by nginx. Set VITE_API_BASE
+// to an absolute URL when the API lives on a different host.
+const API_BASE = import.meta.env?.VITE_API_BASE || "/api";
 
 async function unwrap(res) {
   if (res.ok) return res.json();
@@ -43,4 +46,12 @@ export async function chatQuery(payload) {
 
 export async function getInsights(runKey) {
   return unwrap(await fetch(`${API_BASE}/insights/${runKey}`));
+}
+
+export async function listRuns(limit = 50) {
+  return unwrap(await fetch(`${API_BASE}/runs?limit=${limit}`));
+}
+
+export async function deleteRun(runKey) {
+  return unwrap(await fetch(`${API_BASE}/runs/${runKey}`, { method: "DELETE" }));
 }

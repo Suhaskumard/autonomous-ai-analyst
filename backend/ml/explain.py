@@ -50,7 +50,7 @@ def map_to_source_columns(transformed_names: list[str], source_columns: list[str
 def _aggregate(importances: np.ndarray, parents: list[str], top_n: int) -> list[dict]:
     """Sum the contribution of every one-hot child into its parent column."""
     totals: dict[str, float] = {}
-    for value, parent in zip(importances, parents):
+    for value, parent in zip(importances, parents, strict=True):
         totals[parent] = totals.get(parent, 0.0) + float(value)
     result = [{"feature": name, "importance": value} for name, value in totals.items()]
     result.sort(key=lambda item: item["importance"], reverse=True)
@@ -117,7 +117,15 @@ def explain_pipeline(
     if SHAP_AVAILABLE:
         try:
             explainer = shap.Explainer(estimator, sample)
-            values = explainer(sample).values
+            try:
+                # TreeExplainer's additivity check fails on random forests over
+                # floating-point rounding across many trees, which would send
+                # the most commonly selected model down the native fallback for
+                # no real reason. Ranking is unaffected by the check.
+                values = explainer(sample, check_additivity=False).values
+            except TypeError:
+                # Explainers that do not accept the argument.
+                values = explainer(sample).values
             if values.ndim == 3:
                 # (rows, features, classes) -> average magnitude across classes
                 values = np.abs(values).mean(axis=2)

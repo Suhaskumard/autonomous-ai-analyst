@@ -1,46 +1,17 @@
-"""Central place for environment-driven settings.
+"""Typed application settings.
 
-Phase 2 of the upgrade plan replaces this with a pydantic-settings object; for
-now it just keeps os.getenv calls from being scattered across the routes.
+One object, validated at import, instead of os.getenv calls scattered across
+routes. Every knob is documented in backend/.env.example.
 """
 
-import os
+from functools import lru_cache
+from pathlib import Path
 
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BASE_DIR = Path(__file__).resolve().parent
 _MB = 1024 * 1024
-
-
-def _int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _list_env(name: str, default: list[str]) -> list[str]:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
-
-# --- CORS -------------------------------------------------------------------
-# Explicit origins only. allow_credentials stays off until there is an auth
-# story that needs it (a wildcard plus credentials is rejected by browsers).
-def cors_origins() -> list[str]:
-    return _list_env("CORS_ALLOW_ORIGINS", ["http://localhost:5173", "http://127.0.0.1:5173"])
-
-
-# --- Upload limits ----------------------------------------------------------
-def max_upload_bytes() -> int:
-    return _int_env("MAX_UPLOAD_MB", 50) * _MB
-
-
-def max_upload_rows() -> int:
-    return _int_env("MAX_UPLOAD_ROWS", 1_000_000)
-
 
 ALLOWED_UPLOAD_EXTENSIONS = {".csv", ".txt", ".tsv"}
 
@@ -55,11 +26,58 @@ ALLOWED_UPLOAD_CONTENT_TYPES = {
 }
 
 
-# --- LLM --------------------------------------------------------------------
-def gemini_api_key() -> str | None:
-    key = os.getenv("GEMINI_API_KEY")
-    return key.strip() if key and key.strip() else None
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(BASE_DIR / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # --- LLM ---------------------------------------------------------------
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-1.5-flash-8b"
+
+    # --- CORS --------------------------------------------------------------
+    # Kept as a raw string: pydantic-settings would otherwise try to JSON-decode
+    # a list-typed field and reject the comma-separated form people actually write.
+    cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    # --- Upload limits -----------------------------------------------------
+    max_upload_mb: int = Field(default=50, gt=0)
+    max_upload_rows: int = Field(default=1_000_000, gt=0)
+
+    # --- Persistence -------------------------------------------------------
+    # Jobs and run history live here so they survive a restart and are visible
+    # to every worker process.
+    database_url: str = f"sqlite:///{(BASE_DIR / 'models' / 'analyst.db').as_posix()}"
+
+    # --- Logging -----------------------------------------------------------
+    log_level: str = "INFO"
+    log_json: bool = True
+
+    @field_validator("log_level")
+    @classmethod
+    def _upper(cls, value: str) -> str:
+        return value.upper()
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [item.strip() for item in self.cors_allow_origins.split(",") if item.strip()]
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * _MB
+
+    @property
+    def gemini_key(self) -> str | None:
+        key = (self.gemini_api_key or "").strip()
+        return key or None
 
 
-def gemini_model() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-1.5-flash-8b")
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

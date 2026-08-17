@@ -1,0 +1,16 @@
+# Direct dependencies. Compile to a fully pinned requirements.txt with:
+#   uv pip compile backend/requirements.in -o backend/requirements.txt
+fastapi
+uvicorn[standard]
+pandas
+numpy
+scikit-learn
+xgboost
+shap
+joblib
+python-multipart
+scipy
+google-genai
+python-dotenv
+pydantic-settings
+sqlmodel

@@ -1,0 +1,8 @@
+# Dev/CI tooling. Compile with:
+#   uv pip compile backend/requirements-dev.in -o backend/requirements-dev.txt
+-r requirements.in
+pytest
+pytest-cov
+httpx
+ruff
+pre-commit

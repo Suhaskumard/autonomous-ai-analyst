@@ -49,11 +49,21 @@ backend/
     metadata/     <-- Per-run blueprints + data snapshot
     saved_models/ <-- Fitted Pipeline bundles
 
+  db.py           <-- Job + run persistence (SQLite via SQLModel)
+  config.py       <-- Typed settings (pydantic-settings)
+  logging_config.py <-- JSON logs with request/job correlation
+  exceptions.py   <-- Domain errors the routes map to status codes
+  tests/          <-- pytest suite + fixture CSVs
+
 frontend/
   src/
     styles.css    <-- Premium Design System
   components/     <-- Modern React Components (Lucide-powered)
   pages/          <-- Unified Analytical Workflows
+  tests/          <-- Vitest + Testing Library
+
+.github/workflows/ci.yml   <-- lint, format, tests, build, image build, secret scan
+docker-compose.yml         <-- one-command startup
 ```
 
 ---
@@ -84,14 +94,30 @@ frontend/
 ### 2. Setup Frontend
 1. Navigate to `frontend/`.
 2. Install dependencies: `npm install`.
-3. Start the dev server: `npm run dev`.
+3. Start the dev server: `npm run dev`. It proxies `/api` to `localhost:8000`, so no CORS is involved in development.
 
-### 3. Enable the Secret Scanner (contributors)
+### 3. Or just use Docker
+```bash
+docker compose up --build
+```
+Frontend on http://localhost:5173, API on http://localhost:8000. nginx serves the
+built app and proxies `/api` to the backend, so the browser makes no cross-origin
+requests. Trained artifacts and the job database persist in the `analyst-models` volume.
+
+### 4. Developing
 ```bash
 pip install -r backend/requirements-dev.txt
-pre-commit install
+pre-commit install     # gitleaks + ruff run before every commit
+
+pytest                 # backend suite
+ruff check . && ruff format --check .
+cd frontend && npm test && npm run build
 ```
-`gitleaks` then blocks any commit containing a credential.
+Dependencies are pinned. Edit `backend/requirements.in`, then recompile:
+```bash
+uv pip compile backend/requirements.in -o backend/requirements.txt
+uv pip compile backend/requirements-dev.in -o backend/requirements-dev.txt
+```
 
 ---
 
@@ -120,6 +146,9 @@ The interface follows a **"Depth & Clarity"** approach:
 
 - **Clean Slate**: trained artifacts live in `backend/models/` and are gitignored; they are regenerated on demand and never committed.
 - **Dataset Snapshot**: the backend stores a sanitized CSV snapshot per run, used for the chatbot and for reproducing results.
+- **Durable jobs**: job state and the run registry live in SQLite (`DATABASE_URL`), so a restart does not lose them and multiple workers see the same rows. A job interrupted by a restart is marked failed with an explanation rather than polling forever.
+- **Structured logs**: one JSON object per line, each carrying a request id (echoed as the `x-request-id` header) and, inside a training job, the job id.
+- **Probes**: `GET /healthz` (liveness) and `GET /readyz` (readiness — checks the database and reports whether an LLM key is configured).
 
 ### Where your data goes
 

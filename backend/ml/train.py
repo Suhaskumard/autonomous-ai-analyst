@@ -25,6 +25,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.svm import SVC, SVR
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
+from exceptions import TrainingError
 from ml.evaluate import evaluate_classification, evaluate_regression
 
 logger = logging.getLogger(__name__)
@@ -88,9 +89,7 @@ def get_model_registry(problem_type: str) -> dict:
 
     registry = {
         "LinearRegression": LinearRegression(),
-        "RandomForestRegressor": RandomForestRegressor(
-            n_estimators=100, max_depth=10, random_state=RANDOM_STATE
-        ),
+        "RandomForestRegressor": RandomForestRegressor(n_estimators=100, max_depth=10, random_state=RANDOM_STATE),
         "DecisionTreeRegressor": DecisionTreeRegressor(max_depth=10, random_state=RANDOM_STATE),
         "SVR": SVR(max_iter=2000),
     }
@@ -153,9 +152,7 @@ def train_models(
     if mode == "manual" and manual_model:
         if manual_model not in registry:
             available = ", ".join(registry)
-            raise ValueError(
-                f"Model '{manual_model}' is not available for {problem_type}. Available: {available}."
-            )
+            raise TrainingError(f"Model '{manual_model}' is not available for {problem_type}. Available: {available}.")
         registry = {manual_model: registry[manual_model]}
 
     trained_models: dict[str, Pipeline] = {}
@@ -185,7 +182,7 @@ def train_models(
 
     if not trained_models:
         detail = "; ".join(f"{name}: {err}" for name, err in failed_models.items())
-        raise ValueError(f"Every candidate model failed to train. Details — {detail}")
+        raise TrainingError(f"Every candidate model failed to train. Details — {detail}")
 
     return {
         "problem_type": problem_type,

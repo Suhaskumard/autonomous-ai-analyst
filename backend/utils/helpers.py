@@ -1,7 +1,7 @@
-from datetime import datetime
+import re
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-import re
 
 import pandas as pd
 
@@ -15,8 +15,13 @@ def ensure_storage_dirs() -> None:
     METADATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def now_utc() -> datetime:
+    """Timezone-aware UTC now. datetime.utcnow() is deprecated and naive."""
+    return datetime.now(UTC).replace(microsecond=0)
+
+
 def now_utc_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return now_utc().isoformat()
 
 
 def read_csv_flexible(file_bytes: bytes) -> tuple[pd.DataFrame, list[str]]:
@@ -72,7 +77,7 @@ def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for i, col in enumerate(df.columns):
         c = sanitize_text(col, max_len=60)
         if not c:
-            c = f"column_{i+1}"
+            c = f"column_{i + 1}"
         original = c
         suffix = 2
         while c in seen:

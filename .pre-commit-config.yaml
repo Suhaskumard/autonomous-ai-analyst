@@ -1,4 +1,4 @@
-# Secret scanning so a credential can never be committed again.
+# Runs the same gates as CI, before the commit rather than after.
 # Install once:  pip install -r backend/requirements-dev.txt && pre-commit install
 # Scan history:  pre-commit run gitleaks --all-files
 repos:
@@ -7,12 +7,21 @@ repos:
     hooks:
       - id: gitleaks
 
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.3
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: detect-private-key
       - id: check-added-large-files
         args: ["--maxkb=5000"]
+      - id: check-yaml
+      - id: check-toml
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-merge-conflict

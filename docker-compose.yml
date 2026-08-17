@@ -1,0 +1,37 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      # The frontend is served same-origin through nginx, so the only origin
+      # that needs listing is the browser-facing one.
+      CORS_ALLOW_ORIGINS: "http://localhost:5173"
+      DATABASE_URL: "sqlite:////app/models/analyst.db"
+      LOG_LEVEL: "INFO"
+      LOG_JSON: "true"
+      MAX_UPLOAD_MB: "50"
+      MAX_UPLOAD_ROWS: "1000000"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-1.5-flash-8b}"
+    volumes:
+      # Trained artifacts and the job database survive a container rebuild.
+      - analyst-models:/app/models
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Relative base: requests go to nginx, which proxies to the backend.
+        VITE_API_BASE: "/api"
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  analyst-models:

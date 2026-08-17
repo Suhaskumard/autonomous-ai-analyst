@@ -8,7 +8,7 @@ export default function PredictPanel({ runKey, features = [], onPredict }) {
 
   const handlePredict = async (e) => {
     e.preventDefault();
-    const file = e.target.predictFile.files[0];
+    const file = e.target.elements.predictFile?.files?.[0];
     if (!file) return;
     setLoading(true);
     setError("");
