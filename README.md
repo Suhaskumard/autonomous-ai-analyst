@@ -3,25 +3,28 @@
 An enterprise-grade, full-stack autonomous data science system. It automatically ingests tabular data, executes an end-to-end ML pipeline, and provides an **Advanced AI Analyst** powered by Gemini with native **Code Execution** capabilities.
 
 ![Aesthetic Dashboard](https://img.shields.io/badge/UI-Premium_Glassmorphism-blueviolet)
-![Engine](https://img.shields.io/badge/Engine-Gemini_1.5_Flash-orange)
+![Engine](https://img.shields.io/badge/Engine-Gemini_(configurable)-orange)
 ![Capability](https://img.shields.io/badge/Chat-Code_Execution_Enabled-success) 
  
 ## 🌟 Key Features
   
 - **Advanced AI Chatbot (Gemini-Powered)**:
-  - **Native Code Execution**: The AI writes and runs real Python code on your datasets to calculate correlations, find outliers, and generate custom insights.
+  - **Native Code Execution**: your dataset snapshot is uploaded to the Gemini Files API and attached to the conversation, so the model's Python runs against the actual rows — not against a path it cannot reach. See *Where your data goes* below.
   - **Contextual Memory**: Remembers past interactions for multi-turn analytical deep-dives.
   - **Dynamic Analysis**: Ask "Find the top 3 correlations" or "Plot the distribution of the target," and the AI handles the logic.
+  - **Honest about its reach**: the chat header reports the configured model and whether the answer came from your rows or from summary statistics alone.
 - **Premium Design System**: 
   - Modern **Glassmorphic** UI with a sophisticated dark-mode aesthetic.
   - HSL-tailored color palette with vibrant accents and micro-interactions.
   - Responsive layout with high-performance animations.
 - **Autonomous ML Pipeline**:  
-  - **Zero-touch Preprocessing**: Automatic scaling, encoding, and target detection.
-  - **Smart Modeling**: Auto-selection, Ensembling, or Manual fine-tuning.
-  - **Explainability**: Integrated SHAP-based feature importance.
+  - **Leak-free by construction**: the train/test split happens *before* anything is fitted. Preprocessing and estimator live in one sklearn Pipeline fitted on the training split only, so no test-set statistic reaches training.
+  - **Target you control**: pick the target column in the UI, or let it auto-detect. Free-text and identifier columns are refused with an explanation instead of being trained on.
+  - **Smart Modeling**: Auto-selection, Ensembling, or Manual fine-tuning. String class labels are encoded for XGBoost and decoded again at predict time.
+  - **Explainability**: SHAP importances labeled with real column names, with one-hot columns summed back into their source column. The UI states whether SHAP or model-native importances were used.
+  - **Health verdict**: every run is scored against a naive baseline (majority class / mean), so a model that does not beat guessing is labeled as such rather than as the "Optimized Model".
 - **Performance Caching**:
-  - SHA256 dataset hashing ensures instant reuse of previously trained models & insights.
+  - Runs are content-addressed on the whole configuration — dataset hash + mode + manual model + target + pipeline version — so changing the mode retrains instead of silently replaying the previous result.
 
 ---
 
@@ -34,10 +37,17 @@ backend/
     upload.py     <-- Pipeline orchestration & Caching
     predict.py    <-- Inference API
   ml/             <-- Core Analytical Engine
-    train.py, preprocess.py, explain.py, quality.py
-  models/
-    metadata/     <-- Persistent dataset blueprints
-    saved_models/ <-- ML Artifacts
+    preprocess.py <-- Target validation, feature typing (fits nothing)
+    train.py      <-- Split-then-fit Pipelines, label encoding
+    explain.py    <-- Name-aligned feature attribution
+    health.py     <-- Baseline comparison / result verdict
+    quality.py, evaluate.py, ensemble.py
+  utils/
+    security.py   <-- Artifact-key validation and path resolution
+    uploads.py    <-- Bounded, streamed upload handling
+  models/         <-- Generated artifacts (gitignored)
+    metadata/     <-- Per-run blueprints + data snapshot
+    saved_models/ <-- Fitted Pipeline bundles
 
 frontend/
   src/
@@ -108,15 +118,18 @@ The interface follows a **"Depth & Clarity"** approach:
 
 ## 📋 Operational Notes
 
-- **Clean Slate**: This upgrade identifies and removes legacy `.pkl` files to ensure a fresh, consistent environment.
-- **Dataset Snapshot**: The backend stores a sanitized CSV snapshot for the Chatbot to execute code against.
-- **Privacy**: Code execution runs in a sandboxed environment provided by Google Gemini.
+- **Clean Slate**: trained artifacts live in `backend/models/` and are gitignored; they are regenerated on demand and never committed.
+- **Dataset Snapshot**: the backend stores a sanitized CSV snapshot per run, used for the chatbot and for reproducing results.
+
+### Where your data goes
+
+When you use the chatbot, the dataset snapshot for that run is **uploaded to the Google Gemini Files API** and referenced by the model's code-execution sandbox. That is what makes its arithmetic real and verifiable — and it means the rows leave your machine. Google retains uploaded files for roughly 48 hours. If that is not acceptable for a given dataset, do not use the chat panel for it; upload and training are entirely local. A fully server-side executor is planned for a later phase.
 
 ---
 
 ## 🔐 Security Posture
 
-- **Path safety**: every `dataset_hash` from a client is validated against `^[a-f0-9]{64}$` and resolved under a known storage root before it is used to load an artifact, so a crafted value cannot reach `joblib.load` on an arbitrary file.
+- **Path safety**: every artifact key (`run_key`) from a client is validated against `^[a-f0-9]{64}$` and resolved under a known storage root before it is used to load an artifact, so a crafted value cannot reach `joblib.load` on an arbitrary file.
 - **Bounded uploads**: uploads stream to a temp file in 1 MB chunks under a byte ceiling (`MAX_UPLOAD_MB`), a row ceiling (`MAX_UPLOAD_ROWS`), and an extension/content-type check. Nothing beyond one chunk is held in memory, and the temp file is removed when the job ends.
 - **CORS**: an explicit origin list from `CORS_ALLOW_ORIGINS`; no wildcard, and credentials are disabled until there is an auth story that needs them.
 - **Secrets**: `backend/.env` is untracked and gitignored, and `pre-commit` runs `gitleaks` on every commit.

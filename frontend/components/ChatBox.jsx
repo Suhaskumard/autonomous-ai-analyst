@@ -2,8 +2,9 @@ import React, { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import { Send, Bot, User, Sparkles, Loader2 } from "lucide-react";
 
-export default function ChatBox({ datasetHash, onAsk }) {
+export default function ChatBox({ runKey, onAsk }) {
   const [query, setQuery] = useState("");
+  const [meta, setMeta] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const chatEndRef = useRef(null);
@@ -32,12 +33,13 @@ export default function ChatBox({ datasetHash, onAsk }) {
         content: h.text
       }));
 
-      const res = await onAsk({ 
-        dataset_hash: datasetHash, 
+      const res = await onAsk({
+        run_key: runKey,
         query,
         history: apiHistory
       });
 
+      setMeta(res.response);
       const aiMsg = { role: "ai", text: res.response.answer };
       setHistory([...newHistory, aiMsg]);
     } catch (err) {
@@ -61,8 +63,13 @@ export default function ChatBox({ datasetHash, onAsk }) {
           <Sparkles size={20} className="text-primary" style={{ color: "var(--primary)" }} />
           Advanced AI Analyst
         </h3>
-        <span style={{ fontSize: "0.8rem", color: "var(--text-dim)" }}>
-          Gemini 1.5 Flash • Code Execution Enabled
+        <span style={{ fontSize: "0.8rem", color: "var(--text-dim)", textAlign: "right" }}>
+          {/* The model and data access are reported by the backend, so the UI
+              cannot advertise a model or a capability that is not in play. */}
+          {meta?.llm_model || "Gemini"}
+          {meta?.data_access === "file" && " • Answering from your uploaded rows"}
+          {meta?.data_access === "stats-only" && " • Summary statistics only"}
+          {meta?.llm_enabled === false && " • Disabled (no API key)"}
         </span>
       </div>
 
@@ -95,7 +102,7 @@ export default function ChatBox({ datasetHash, onAsk }) {
                   Hello! I'm your Autonomous AI Analyst.
                 </p>
                 <p style={{ maxWidth: "400px", lineHeight: "1.6" }}>
-                  I can write Python code to analyze your data, create visualizations, and uncover deep patterns.
+                  Your dataset is attached to this conversation, so I can run Python against the actual rows and show you the code behind every number.
                 </p>
               </div>
             </div>

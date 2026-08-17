@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Play, Download, FileText, AlertTriangle, FileSpreadsheet, Loader2 } from "lucide-react";
 
-export default function PredictPanel({ datasetHash, features = [], onPredict }) {
+export default function PredictPanel({ runKey, features = [], onPredict }) {
   const [predictionResult, setPredictionResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -13,7 +13,7 @@ export default function PredictPanel({ datasetHash, features = [], onPredict }) 
     setLoading(true);
     setError("");
     try {
-      const res = await onPredict(datasetHash, file);
+      const res = await onPredict(runKey, file);
       setPredictionResult(res);
     } catch (err) {
       setError(err.message || "Prediction failed.");
@@ -35,7 +35,7 @@ export default function PredictPanel({ datasetHash, features = [], onPredict }) 
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${datasetHash}_prediction_template.csv`;
+    link.download = `${runKey.slice(0, 12)}_prediction_template.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

@@ -21,6 +21,12 @@ frontend/dist/
 # Scratch/temp
 backend/scratch/
 
+# Generated ML artifacts — regenerated on every run, never committed
+backend/models/metadata/*
+backend/models/saved_models/*
+!backend/models/metadata/.gitkeep
+!backend/models/saved_models/.gitkeep
+
 # Secret scanner baseline is tracked; its cache is not
 .secrets.baseline.tmp
 

@@ -11,8 +11,9 @@ export default function UploadPage() {
   const [loading, setLoading] = useState(false);
   const [jobStatus, setJobStatus] = useState(null);
   const [error, setError] = useState("");
+  const [errorKind, setErrorKind] = useState("");
 
-  const handleSubmit = async (e, mode, manualModel) => {
+  const handleSubmit = async (e, mode, manualModel, targetColumn) => {
     e.preventDefault();
     const file = e.target.file.files[0];
     if (!file) return;
@@ -21,9 +22,11 @@ export default function UploadPage() {
     formData.append("file", file);
     formData.append("mode", mode);
     if (mode === "manual") formData.append("manual_model", manualModel);
+    if (targetColumn) formData.append("target_column", targetColumn);
 
     setLoading(true);
     setError("");
+    setErrorKind("");
     setJobStatus(null);
     setResult(null);
     try {
@@ -38,6 +41,7 @@ export default function UploadPage() {
           setResult(status.result);
           done = true;
         } else if (status.state === "failed") {
+          setErrorKind(status.error_kind || "pipeline");
           throw new Error(status.error || "Job failed.");
         } else {
           await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -105,8 +109,15 @@ export default function UploadPage() {
           <div style={{ display: "flex", alignItems: "center", gap: "12px", color: "#f8717b" }}>
             <AlertCircle size={24} />
             <div>
-              <h3 style={{ margin: 0, fontSize: "1rem", color: "#f8717b" }}>Analysis Failed</h3>
+              <h3 style={{ margin: 0, fontSize: "1rem", color: "#f8717b" }}>
+                {errorKind === "target" ? "Unusable Target Column" : "Analysis Failed"}
+              </h3>
               <p style={{ margin: 0, fontSize: "0.9rem", color: "rgba(248, 113, 123, 0.8)" }}>{error}</p>
+              {errorKind === "target" && (
+                <p style={{ margin: "6px 0 0", fontSize: "0.85rem", color: "var(--text-dim)" }}>
+                  Pick a different column in the Target Column dropdown above and run again.
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -117,15 +128,15 @@ export default function UploadPage() {
           <Dashboard result={result} />
           
           <div className="grid-2">
-            {result.dataset_hash && (
+            {result.run_key && (
               <PredictPanel
-                datasetHash={result.dataset_hash}
+                runKey={result.run_key}
                 features={result.features || []}
                 onPredict={predictDataset}
               />
             )}
-            {result.dataset_hash && (
-              <ChatBox datasetHash={result.dataset_hash} onAsk={chatQuery} />
+            {result.run_key && (
+              <ChatBox runKey={result.run_key} onAsk={chatQuery} />
             )}
           </div>
         </div>
