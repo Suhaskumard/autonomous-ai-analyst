@@ -2,18 +2,27 @@
 __pycache__/
 *.pyc
 
-# Env files
+# Env files — never commit real credentials; .env.example is the tracked template
 .env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
 
 # Node
 node_modules/
 frontend/node_modules/
 
-# Vite cache
+# Vite cache and build output (built artifacts do not belong in git)
 .vite/
+frontend/dist/
 
 # Scratch/temp
 backend/scratch/
+
+# Secret scanner baseline is tracked; its cache is not
+.secrets.baseline.tmp
 
 # OS
 .DS_Store

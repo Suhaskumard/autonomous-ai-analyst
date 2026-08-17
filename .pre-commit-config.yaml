@@ -1,0 +1,18 @@
+# Secret scanning so a credential can never be committed again.
+# Install once:  pip install -r backend/requirements-dev.txt && pre-commit install
+# Scan history:  pre-commit run gitleaks --all-files
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict

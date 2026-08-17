@@ -3,13 +3,14 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from utils.helpers import METADATA_DIR
+from utils.security import artifact_path
 
 router = APIRouter()
 
 
 @router.get("/insights/{dataset_hash}")
 def get_insights(dataset_hash: str):
-    metadata_path = METADATA_DIR / f"{dataset_hash}.json"
+    metadata_path = artifact_path(METADATA_DIR, dataset_hash, ".json")
     if not metadata_path.exists():
         raise HTTPException(status_code=404, detail="No metadata found for this dataset hash.")
     with metadata_path.open("r", encoding="utf-8") as f:

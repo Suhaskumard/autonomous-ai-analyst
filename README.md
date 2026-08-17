@@ -55,11 +55,15 @@ frontend/
 2. Create and activate a virtual environment.
 3. Install dependencies: `pip install -r requirements.txt`.
 4. **Configure Environment Variables**:
-   - Create a `.env` file in the `backend/` directory.
-   - Add your Gemini API Key:
+   - Copy `backend/.env.example` to `backend/.env` and fill it in. `.env` is gitignored — never commit it.
      ```env
      GEMINI_API_KEY="your_api_key_here"
      GEMINI_MODEL="gemini-1.5-flash-8b"  # Recommended for best availability
+
+     # Optional, shown with their defaults
+     CORS_ALLOW_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
+     MAX_UPLOAD_MB=50
+     MAX_UPLOAD_ROWS=1000000
      ```
 5. **Verify Connection**:
    ```bash
@@ -71,6 +75,13 @@ frontend/
 1. Navigate to `frontend/`.
 2. Install dependencies: `npm install`.
 3. Start the dev server: `npm run dev`.
+
+### 3. Enable the Secret Scanner (contributors)
+```bash
+pip install -r backend/requirements-dev.txt
+pre-commit install
+```
+`gitleaks` then blocks any commit containing a credential.
 
 ---
 
@@ -100,3 +111,14 @@ The interface follows a **"Depth & Clarity"** approach:
 - **Clean Slate**: This upgrade identifies and removes legacy `.pkl` files to ensure a fresh, consistent environment.
 - **Dataset Snapshot**: The backend stores a sanitized CSV snapshot for the Chatbot to execute code against.
 - **Privacy**: Code execution runs in a sandboxed environment provided by Google Gemini.
+
+---
+
+## 🔐 Security Posture
+
+- **Path safety**: every `dataset_hash` from a client is validated against `^[a-f0-9]{64}$` and resolved under a known storage root before it is used to load an artifact, so a crafted value cannot reach `joblib.load` on an arbitrary file.
+- **Bounded uploads**: uploads stream to a temp file in 1 MB chunks under a byte ceiling (`MAX_UPLOAD_MB`), a row ceiling (`MAX_UPLOAD_ROWS`), and an extension/content-type check. Nothing beyond one chunk is held in memory, and the temp file is removed when the job ends.
+- **CORS**: an explicit origin list from `CORS_ALLOW_ORIGINS`; no wildcard, and credentials are disabled until there is an auth story that needs them.
+- **Secrets**: `backend/.env` is untracked and gitignored, and `pre-commit` runs `gitleaks` on every commit.
+
+Still open (later phases): there is no authentication or rate limiting on any route, including the paid LLM endpoint. Run this on a trusted network only.

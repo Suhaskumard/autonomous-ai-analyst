@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Secret scanning / commit hygiene (Phase 0)
+pre-commit

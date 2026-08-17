@@ -5,12 +5,14 @@ import joblib
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 
+from config import max_upload_rows
 from ml.explain import explain_model
 from ml.preprocess import preprocess_dataset
 from ml.quality import data_quality_report, remove_duplicate_rows
 from ml.train import train_models
-from utils.hashing import dataset_sha256
 from utils.helpers import METADATA_DIR, MODEL_DIR, ensure_storage_dirs, now_utc_iso, read_csv_flexible, sanitize_text
+from utils.security import artifact_path
+from utils.uploads import StoredUpload, read_upload_to_temp
 
 router = APIRouter()
 UPLOAD_JOBS: dict[str, dict] = {}
@@ -76,17 +78,20 @@ def _update_job(job_id: str, step: str, progress: int) -> None:
     job["status_log"].append({"step": step, "progress": progress, "timestamp": now_utc_iso()})
 
 
-def _run_upload_pipeline(job_id: str, file_bytes: bytes, mode: str, manual_model: str | None) -> None:
+def _run_upload_pipeline(job_id: str, stored: StoredUpload, mode: str, manual_model: str | None) -> None:
     try:
         ensure_storage_dirs()
         mode = mode.lower()
         _update_job(job_id, "Hashing dataset", 5)
-        dataset_hash = dataset_sha256(file_bytes)
+        # Digest was computed while streaming the upload to disk, so the file
+        # is never hashed by pulling it back into memory.
+        dataset_hash = stored.sha256
+        file_bytes = stored.read_bytes()
 
-        metadata_path = METADATA_DIR / f"{dataset_hash}.json"
-        data_snapshot_path = METADATA_DIR / f"{dataset_hash}_data.csv"
-        model_path = MODEL_DIR / f"{dataset_hash}_model.pkl"
-        pipeline_path = MODEL_DIR / f"{dataset_hash}_pipeline.pkl"
+        metadata_path = artifact_path(METADATA_DIR, dataset_hash, ".json")
+        data_snapshot_path = artifact_path(METADATA_DIR, dataset_hash, "_data.csv")
+        model_path = artifact_path(MODEL_DIR, dataset_hash, "_model.pkl")
+        pipeline_path = artifact_path(MODEL_DIR, dataset_hash, "_pipeline.pkl")
 
         if metadata_path.exists() and model_path.exists() and pipeline_path.exists():
             _update_job(job_id, "Cache hit: loading pre-trained artifacts", 100)
@@ -117,6 +122,12 @@ def _run_upload_pipeline(job_id: str, file_bytes: bytes, mode: str, manual_model
             _update_job(job_id, warn, 14)
         if df.shape[0] < 10 or df.shape[1] < 2:
             raise HTTPException(status_code=400, detail="Dataset too small. Need at least 10 rows and 2 columns.")
+        row_cap = max_upload_rows()
+        if df.shape[0] > row_cap:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Dataset has {df.shape[0]:,} rows, above the {row_cap:,}-row limit.",
+            )
 
         _update_job(job_id, "Running data quality checks", 20)
         quality = data_quality_report(df)
@@ -227,6 +238,9 @@ def _run_upload_pipeline(job_id: str, file_bytes: bytes, mode: str, manual_model
         UPLOAD_JOBS[job_id]["state"] = "failed"
         UPLOAD_JOBS[job_id]["error"] = str(exc)
         UPLOAD_JOBS[job_id]["current_step"] = "Failed"
+    finally:
+        # The temp file exists only for the life of this job.
+        stored.cleanup()
 
 
 @router.post("/upload")
@@ -236,7 +250,9 @@ async def upload_dataset(
     mode: str = Form("auto"),
     manual_model: str | None = Form(None),
 ):
-    file_bytes = await file.read()
+    # Streams to a temp file under a byte/row/type ceiling instead of reading
+    # the whole upload into RAM. Raises 400/413 before any work is queued.
+    stored = await read_upload_to_temp(file)
     job_id = str(uuid4())
     UPLOAD_JOBS[job_id] = {
         "job_id": job_id,
@@ -247,7 +263,7 @@ async def upload_dataset(
         "result": None,
         "error": None,
     }
-    background_tasks.add_task(_run_upload_pipeline, job_id, file_bytes, mode, manual_model)
+    background_tasks.add_task(_run_upload_pipeline, job_id, stored, mode, manual_model)
     return {
         "job_id": job_id,
         "state": "queued",

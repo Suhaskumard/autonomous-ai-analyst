@@ -1,5 +1,4 @@
 import json
-import os
 
 from google import genai
 from google.genai import types
@@ -10,7 +9,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from config import gemini_api_key, gemini_model
 from utils.helpers import METADATA_DIR
+from utils.security import artifact_path
 
 router = APIRouter()
 
@@ -27,7 +28,7 @@ class ChatRequest(BaseModel):
 
 
 def _get_gemini_client():
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = gemini_api_key()
     if not api_key:
         return None
     return genai.Client(api_key=api_key)
@@ -35,7 +36,9 @@ def _get_gemini_client():
 
 @router.post("/chat")
 def chat(req: ChatRequest):
-    metadata_path = METADATA_DIR / f"{req.dataset_hash}.json"
+    # Same rule as predict.py: the hash is validated before it is used to build
+    # a path, so a crafted value cannot walk out of the metadata directory.
+    metadata_path = artifact_path(METADATA_DIR, req.dataset_hash, ".json")
     if not metadata_path.exists():
         raise HTTPException(status_code=404, detail="Dataset hash not found. Upload dataset first.")
 
@@ -54,7 +57,7 @@ def chat(req: ChatRequest):
         }
 
     # Default to gemini-1.5-flash-8b if nothing is specified, as it has better availability.
-    model_id = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-8b")
+    model_id = gemini_model()
 
     # Prepare context
     summary_stats = metadata.get("summary_stats", {})
