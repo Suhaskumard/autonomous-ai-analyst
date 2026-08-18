@@ -11,7 +11,20 @@ import { formatNumber } from "./charts/theme";
  * the one decision that decides whether a run is meaningful, and it should be
  * made while looking at the columns rather than from a bare dropdown.
  */
-export default function DataProfile({ profile, mode, manualModel, onModeChange, onManualModelChange, onTrain, onCancel, isTraining }) {
+export default function DataProfile({
+  profile,
+  mode,
+  manualModel,
+  tuningBudget,
+  useSmote,
+  onModeChange,
+  onManualModelChange,
+  onTuningBudgetChange,
+  onUseSmoteChange,
+  onTrain,
+  onCancel,
+  isTraining,
+}) {
   const columns = profile?.column_profiles || [];
   const [target, setTarget] = useState(() => {
     const suggested = columns.find((column) => column.name === profile?.suggested_target);
@@ -156,12 +169,49 @@ export default function DataProfile({ profile, mode, manualModel, onModeChange, 
             >
               <option value="LogisticRegression">Logistic Regression</option>
               <option value="RandomForest">Random Forest</option>
+              <option value="ExtraTrees">Extra Trees</option>
+              <option value="GradientBoosting">Gradient Boosting</option>
+              <option value="HistGradientBoosting">Histogram Gradient Boosting</option>
               <option value="XGBoost">XGBoost</option>
+              <option value="LightGBM">LightGBM</option>
               <option value="DecisionTree">Decision Tree</option>
               <option value="SVM">SVM</option>
             </select>
           </div>
         )}
+
+        <div className="input-group" style={{ margin: 0, minWidth: 220 }}>
+          <label htmlFor="tuning-budget">Hyperparameter search</label>
+          <select
+            id="tuning-budget"
+            className="input"
+            value={String(tuningBudget ?? 0)}
+            onChange={(event) => onTuningBudgetChange(Number(event.target.value))}
+            disabled={isTraining}
+          >
+            {/* A budget, not a switch: the search is bounded by wall-clock so a
+                long sweep degrades to "tuned some models" rather than hanging. */}
+            <option value="0">Off — library defaults</option>
+            <option value="30">Quick (30s budget)</option>
+            <option value="120">Thorough (2 min budget)</option>
+            <option value="300">Exhaustive (5 min budget)</option>
+          </select>
+        </div>
+
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={Boolean(useSmote)}
+            onChange={(event) => onUseSmoteChange(event.target.checked)}
+            disabled={isTraining}
+          />
+          <span>
+            Oversample the minority class (SMOTE)
+            <span className="checkbox-note">
+              Applied inside each fold&apos;s training rows only, never to the rows a score is computed on.
+            </span>
+          </span>
+        </label>
 
         <div className="profile-target-summary">
           <Crosshair size={16} style={{ color: "var(--primary)" }} />

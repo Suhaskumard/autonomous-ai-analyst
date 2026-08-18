@@ -69,18 +69,25 @@ idna==3.18
     #   anyio
     #   httpx
     #   requests
+imbalanced-learn==0.14.2
+    # via -r backend/requirements.in
 iniconfig==2.3.0
     # via pytest
 joblib==1.5.3
     # via
     #   -r backend/requirements.in
+    #   imbalanced-learn
     #   scikit-learn
+lightgbm==4.7.0
+    # via -r backend/requirements.in
 llvmlite==0.49.0
     # via
     #   numba
     #   shap
 narwhals==2.24.0
-    # via scikit-learn
+    # via
+    #   lightgbm
+    #   scikit-learn
 nodeenv==1.10.0
     # via pre-commit
 numba==0.67.0
@@ -88,6 +95,8 @@ numba==0.67.0
 numpy==2.5.2
     # via
     #   -r backend/requirements.in
+    #   imbalanced-learn
+    #   lightgbm
     #   numba
     #   pandas
     #   scikit-learn
@@ -158,10 +167,14 @@ ruff==0.16.3
 scikit-learn==1.9.0
     # via
     #   -r backend/requirements.in
+    #   imbalanced-learn
     #   shap
+    #   sklearn-compat
 scipy==1.18.0
     # via
     #   -r backend/requirements.in
+    #   imbalanced-learn
+    #   lightgbm
     #   scikit-learn
     #   shap
     #   xgboost
@@ -169,6 +182,8 @@ shap==0.52.0
     # via -r backend/requirements.in
 six==1.17.0
     # via python-dateutil
+sklearn-compat==0.1.6
+    # via imbalanced-learn
 slicer==0.0.8
     # via shap
 sniffio==1.3.1
@@ -182,7 +197,9 @@ starlette==1.6.0
 tenacity==9.1.4
     # via google-genai
 threadpoolctl==3.6.0
-    # via scikit-learn
+    # via
+    #   imbalanced-learn
+    #   scikit-learn
 tqdm==4.70.0
     # via shap
 typing-extensions==4.16.0

@@ -23,6 +23,23 @@ An enterprise-grade, full-stack autonomous data science system. It automatically
   - **Smart Modeling**: Auto-selection, Ensembling, or Manual fine-tuning. String class labels are encoded for XGBoost and decoded again at predict time.
   - **Explainability**: SHAP importances labeled with real column names, with one-hot columns summed back into their source column. The UI states whether SHAP or model-native importances were used.
   - **Health verdict**: every run is scored against a naive baseline (majority class / mean), so a model that does not beat guessing is labeled as such rather than as the "Optimized Model".
+- **Scores you can defend**:
+  - **Cross-validated, not lucky**: every candidate is scored over stratified folds and reported as **mean ± standard deviation**, so a model that won on one fortunate split is visibly indistinguishable from its neighbours.
+  - **A holdout nothing touches**: 20% of the data is withheld from cross-validation, hyperparameter search, and model selection alike, then scored exactly once. That number is the one the dashboard leads with.
+  - **Selected on macro F1, not accuracy**: on a 95/5 target a constant predictor scores 95% accuracy. It scores 0.49 macro F1 against a 0.49 baseline, so it can no longer win — and every candidate is compared against a `DummyClassifier` cross-validated on the very same folds.
+  - **Real metrics**: balanced accuracy, macro/weighted F1, and ROC-AUC for classification, with a per-class precision/recall/F1/support breakdown; MAE, R², and MAPE alongside RMSE for regression. MAPE is withheld rather than faked when the actuals are mostly zero.
+- **Imbalance is named and handled**:
+  - A skewed target produces a warning that says how skewed, and class weights are applied to every estimator that supports them (XGBoost gets `scale_pos_weight`).
+  - Optional **SMOTE** oversampling runs *inside* the pipeline, so synthetic rows only ever appear in a fold's training half and never in the rows a score is computed on.
+- **Tuning with a budget you set**:
+  - Randomized hyperparameter search over each model's space, bounded by a wall-clock budget. A long sweep degrades to "tuned the first few, kept defaults for the rest" rather than hanging, and the chosen parameters are recorded per model.
+- **A registry worth choosing from**:
+  - Logistic/linear regression, ridge, lasso, elastic net, random forest, extra trees, gradient boosting, histogram gradient boosting, decision tree, SVM, XGBoost, LightGBM — and CatBoost when installed. The candidate set adapts to dataset size, because a histogram booster is all fixed cost on 300 rows and a kernel SVM is superlinear on 50,000.
+  - High-cardinality categoricals are **target-encoded** (with sklearn's internal cross-fitting) instead of exploding into a capped one-hot block that throws the tail away.
+- **Ensembling that earns its name**:
+  - A weighted `VotingClassifier`/`VotingRegressor` rather than an unweighted mode/mean vote. Members are weighted by how far they beat the baseline, and anything that fails to beat it is excluded from the vote entirely. Soft voting means an ensemble now reports calibrated confidence like any other model.
+- **Model cards**:
+  - Every run persists its configuration, feature typing, class distribution, cross-validated and held-out metrics, tuning history, and the exact library versions that produced them — so a result from three months ago is still interpretable when a scikit-learn upgrade moves a score.
 - **Performance Caching**:
   - Runs are content-addressed on the whole configuration — dataset hash + mode + manual model + target + pipeline version — so changing the mode retrains instead of silently replaying the previous result.
   - A replayed run says so. The dashboard states whether a result was freshly trained, served from cache, or reopened from the workspace.
@@ -60,7 +77,11 @@ backend/
     health.py     <-- Baseline comparison / result verdict
     profile.py    <-- Per-column profile served before training
     diagnostics.py<-- Confusion matrix, residuals, correlations
-    quality.py, evaluate.py, ensemble.py
+    evaluate.py   <-- Imbalance-aware metrics + per-class breakdown
+    imbalance.py  <-- Detection, class weights, in-pipeline SMOTE
+    tuning.py     <-- Budgeted randomized search
+    model_card.py <-- Config, data profile, metrics, library versions
+    quality.py, ensemble.py
   utils/
     security.py   <-- Artifact-key validation and path resolution
     uploads.py    <-- Bounded, streamed upload handling
@@ -82,6 +103,7 @@ frontend/
     DataProfile.jsx    <-- Pre-training column profile + target picker
     Dashboard.jsx      <-- Result surface: health, charts, summary
     DatasetSummary.jsx <-- Per-column statistics and run provenance
+    ModelCard.jsx      <-- How the score was produced: CV, classes, tuning
     Workspace.jsx      <-- Past runs: reopen, compare, delete
     PredictPanel.jsx   <-- CSV or single-row inference, CSV download
     ChatBox.jsx, ErrorBoundary.jsx
@@ -113,6 +135,7 @@ docker-compose.yml         <-- one-command startup
      CORS_ALLOW_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
      MAX_UPLOAD_MB=50
      MAX_UPLOAD_ROWS=1000000
+     MAX_CANDIDATE_MODELS=0   # 0 = try the whole registry
      ```
 5. **Verify Connection**:
    ```bash
@@ -178,6 +201,8 @@ The interface follows a **"Depth & Clarity"** approach:
 - **Durable jobs**: job state and the run registry live in SQLite (`DATABASE_URL`), so a restart does not lose them and multiple workers see the same rows. A job interrupted by a restart is marked failed with an explanation rather than polling forever.
 - **Structured logs**: one JSON object per line, each carrying a request id (echoed as the `x-request-id` header) and, inside a training job, the job id.
 - **Probes**: `GET /healthz` (liveness) and `GET /readyz` (readiness — checks the database and reports whether an LLM key is configured).
+- **Training cost**: cross-validation multiplies every fit by the fold count, so a run is meaningfully slower than a single-split one — that is the price of a score with a variance attached. `MAX_CANDIDATE_MODELS` caps how many candidates a run may try when a fast answer matters more than an exhaustive one, and the candidate set already adapts to dataset size.
+- **Optional model libraries**: LightGBM and imbalanced-learn are pinned in `requirements.txt`. CatBoost is used when it happens to be installed but is not pinned — the wheel is ~100 MB and LightGBM covers similar ground. A missing optional library removes its models from the registry and is recorded as absent in the model card, rather than failing the run.
 
 ### Where your data goes
 

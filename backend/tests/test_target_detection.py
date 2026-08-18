@@ -66,10 +66,18 @@ def test_low_cardinality_regression_is_not_called_classification():
     assert detect_problem_type(prices) == "regression"
 
 
-def test_high_cardinality_feature_is_capped_not_exploded(fixture_df):
+def test_high_cardinality_feature_is_target_encoded_not_exploded(fixture_df):
+    """180 cities become one dense column, not 180 sparse ones.
+
+    Capping one-hot at 50 kept the width sane but threw the tail away. Target
+    encoding keeps every level and costs one column, which is the whole reason
+    the categorical-native path exists.
+    """
     df = fixture_df("high_cardinality.csv")
     prepared = prepare_dataset(df, target_column="label")
-    assert "city" in prepared["categorical_columns"], "should be kept, not dropped"
+
+    assert "city" in prepared["high_cardinality_columns"], "should be target-encoded, not dropped"
+    assert "city" not in prepared["categorical_columns"], "should not go down the one-hot path"
 
     trained = train_models(
         prepared["X"],
@@ -80,8 +88,47 @@ def test_high_cardinality_feature_is_capped_not_exploded(fixture_df):
     )
     preprocessor = trained["trained_models"]["DecisionTree"].named_steps["preprocessor"]
     width = preprocessor.transform(prepared["X"]).shape[1]
-    assert width <= MAX_ONEHOT_CATEGORIES + 2, f"one-hot exploded to {width} columns"
-    assert any("Capped one-hot" in warning for warning in prepared["warnings"])
+    # num + city -> 2 columns, nowhere near the 180 a raw one-hot would make.
+    assert width <= MAX_ONEHOT_CATEGORIES, f"encoding exploded to {width} columns"
+    assert any("Target-encoded" in warning for warning in prepared["warnings"])
+
+
+def test_target_encoded_names_still_map_back_to_their_source_column(fixture_df):
+    """Attribution must survive the new encoder, not just the one-hot one."""
+    from ml.explain import map_to_source_columns, transformed_feature_names
+
+    df = fixture_df("high_cardinality.csv")
+    prepared = prepare_dataset(df, target_column="label")
+    trained = train_models(
+        prepared["X"],
+        prepared["y"],
+        preprocessor=prepared["preprocessor"],
+        mode="manual",
+        manual_model="DecisionTree",
+    )
+    preprocessor = trained["trained_models"]["DecisionTree"].named_steps["preprocessor"]
+
+    names = transformed_feature_names(preprocessor)
+    parents = map_to_source_columns(names, prepared["feature_columns"])
+
+    assert "city" in parents
+    assert set(parents) <= set(prepared["feature_columns"])
+
+
+def test_moderate_cardinality_still_goes_through_one_hot():
+    """The categorical-native path is for wide columns, not for every column."""
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "colour": ["red", "green", "blue"] * 40,
+            "num": list(range(120)),
+            "label": ["a", "b"] * 60,
+        }
+    )
+    prepared = prepare_dataset(df, target_column="label")
+    assert "colour" in prepared["categorical_columns"]
+    assert prepared["high_cardinality_columns"] == []
 
 
 def test_free_text_feature_columns_are_dropped(fixture_df):

@@ -70,7 +70,44 @@ function completedResult(overrides = {}) {
     selected_model: "RandomForest",
     target: "churn",
     features: ["age", "region", "spend"],
-    all_model_scores: { RandomForest: { accuracy: 0.93 }, DecisionTree: { accuracy: 0.81 } },
+    all_model_scores: {
+      RandomForest: { accuracy: 0.93, f1_macro: 0.92, balanced_accuracy: 0.91, roc_auc: 0.96 },
+      DecisionTree: { accuracy: 0.81, f1_macro: 0.79, balanced_accuracy: 0.78 },
+    },
+    selection_metric: "f1_macro",
+    cv_folds: 5,
+    holdout_rows: 48,
+    cv_scores: {
+      RandomForest: { f1_macro: { mean: 0.9, std: 0.03, folds: [0.87, 0.9, 0.92, 0.89, 0.92] } },
+      DecisionTree: { f1_macro: { mean: 0.77, std: 0.05, folds: [0.7, 0.78, 0.8, 0.76, 0.81] } },
+    },
+    baseline_cv: { f1_macro: { mean: 0.34, std: 0.01, folds: [0.34, 0.34, 0.34, 0.34, 0.34] } },
+    per_class: [
+      { label: "no", precision: 0.94, recall: 0.95, f1: 0.945, support: 30 },
+      { label: "yes", precision: 0.88, recall: 0.86, f1: 0.87, support: 18 },
+    ],
+    imbalance: {
+      imbalanced: false,
+      severe: false,
+      ratio: 1.67,
+      warnings: [],
+      distribution: [
+        { label: "no", count: 150, share: 0.625 },
+        { label: "yes", count: 90, share: 0.375 },
+      ],
+    },
+    class_weighting: {},
+    smote_used: false,
+    tuning: [],
+    tuning_budget_seconds: 0,
+    ensemble_members: [],
+    model_card: {
+      schema: 1,
+      environment: { libraries: { "scikit-learn": "1.6.1", xgboost: "3.4.1", catboost: null } },
+      data: { target: "churn", features: { numeric: ["age", "spend"], one_hot: ["region"], target_encoded: [] } },
+      training: { selection_metric: "f1_macro", candidates: ["RandomForest", "DecisionTree"], cv_folds: 5 },
+      metrics: {},
+    },
     feature_importance: [
       { feature: "region", importance: 0.6 },
       { feature: "age", importance: 0.3 },
@@ -106,10 +143,14 @@ function completedResult(overrides = {}) {
     health: {
       verdict: "strong",
       headline: "Model beats the naive baseline",
-      metric: "accuracy",
-      score: 0.93,
-      baseline: 0.5,
-      reasons: ["Beats the naive baseline by 0.43 on accuracy."],
+      metric: "f1_macro",
+      metric_label: "macro F1",
+      score: 0.92,
+      baseline: 0.34,
+      cv_mean: 0.9,
+      cv_std: 0.03,
+      holdout_rows: 48,
+      reasons: ["Beats the naive baseline by 0.58 on macro F1."],
     },
     ...overrides,
   };
@@ -237,14 +278,16 @@ describe("profile -> train -> dashboard", () => {
         progress: 100,
         result: completedResult({
           selected_model: "DecisionTree",
-          all_model_scores: { DecisionTree: { accuracy: 0.017 } },
+          all_model_scores: { DecisionTree: { accuracy: 0.017, f1_macro: 0.012 } },
+          cv_scores: { DecisionTree: { f1_macro: { mean: 0.011, std: 0.004, folds: [0.01, 0.012] } } },
           health: {
             verdict: "unreliable",
             headline: "This model is not better than guessing",
-            metric: "accuracy",
-            score: 0.017,
+            metric: "f1_macro",
+            metric_label: "macro F1",
+            score: 0.012,
             baseline: 0.02,
-            reasons: ["Accuracy of 1.7% does not beat the 2.0% baseline."],
+            reasons: ["Macro F1 of 0.012 does not beat the 0.020 baseline."],
           },
         }),
       },
@@ -411,9 +454,186 @@ describe("charts", () => {
     expect(screen.getByText(/at least two varying numeric columns/i)).toBeInTheDocument();
   });
 
-  it("shows every model's score, not only the winner's", async () => {
+  /** The scores chart, addressed by its heading rather than by loose text. */
+  function scoresFrame() {
+    return screen.getByRole("heading", { name: /Cross-validated macro F1/i }).closest("section");
+  }
+
+  it("shows every model's score as a cross-validated mean, not a single split", async () => {
     await renderDashboard();
-    const frame = screen.getByText(/Model scores \(accuracy\)/i).closest("section");
+    const frame = scoresFrame();
     expect(frame).toBeInTheDocument();
+    expect(within(frame).getByText(/Mean \+\/- 1 sd over 5 folds/i)).toBeInTheDocument();
+  });
+
+  it("puts the spread next to every model in the table view", async () => {
+    const user = userEvent.setup();
+    await renderDashboard();
+    const frame = scoresFrame();
+
+    await user.click(within(frame).getByRole("button", { name: /Table/i }));
+
+    // The winner is named as the winner, and its variance is shown, not hidden.
+    expect(within(frame).getByText("RandomForest (selected)")).toBeInTheDocument();
+    expect(within(frame).getByText("+/- 0.0300")).toBeInTheDocument();
+    expect(within(frame).getByText("DecisionTree")).toBeInTheDocument();
+    expect(within(frame).getByText("+/- 0.0500")).toBeInTheDocument();
+  });
+
+  it("leads the metric tiles with macro F1 rather than accuracy", async () => {
+    await renderDashboard();
+    const tiles = Array.from(document.querySelectorAll(".stat-label")).map((node) => node.textContent);
+    // Accuracy is still reported; it is just no longer the headline number.
+    expect(tiles.indexOf("macro F1")).toBeGreaterThanOrEqual(0);
+    expect(tiles.indexOf("macro F1")).toBeLessThan(tiles.indexOf("accuracy"));
+    expect(tiles).toContain("balanced accuracy");
+    expect(tiles).toContain("ROC-AUC");
+  });
+
+  it("names the metric the verdict was actually made on", async () => {
+    await renderDashboard();
+    const banner = screen.getByText(/Model beats the naive baseline/i).closest(".card");
+    expect(banner.textContent).toMatch(/Macro F1 0\.9200 vs naive baseline 0\.3400/);
+    expect(banner.textContent).toMatch(/always predicting the most common class/);
+  });
+});
+
+// --- model card ---------------------------------------------------------
+
+describe("model card", () => {
+  beforeEach(stubApi);
+
+  async function renderCard() {
+    const user = userEvent.setup();
+    pollSequence([{ state: "completed", progress: 100, result: completedResult() }]);
+    render(<UploadPage />);
+    await chooseFile(user);
+    await trainWithTarget(user);
+    await screen.findByText(/Model card/i);
+    return user;
+  }
+
+  function cardRoot() {
+    return screen.getByRole("heading", { name: /Model card/i }).closest(".card");
+  }
+
+  it("states that selection was cross-validated and on which metric", async () => {
+    await renderCard();
+    const card = cardRoot();
+    expect(within(card).getByText(/Selected on cross-validated/i)).toBeInTheDocument();
+    expect(within(card).getByText("0.9000 ± 0.0300")).toBeInTheDocument();
+    expect(within(card).getByText(/over 5 folds/i)).toBeInTheDocument();
+    expect(within(card).getByText(/on 48 unseen rows/i)).toBeInTheDocument();
+  });
+
+  it("breaks performance down per class, so a failing class cannot hide", async () => {
+    await renderCard();
+    const table = screen.getByRole("table", { name: /Per-class performance/i });
+    const row = within(table).getByRole("row", { name: /^yes/ });
+
+    expect(within(row).getByText("0.880")).toBeInTheDocument(); // precision
+    expect(within(row).getByText("0.860")).toBeInTheDocument(); // recall
+    expect(within(row).getByText("18")).toBeInTheDocument(); // support
+  });
+
+  it("shows the class balance the run was trained against", async () => {
+    await renderCard();
+    const card = cardRoot();
+    expect(within(card).getByText("150 (62.5%)")).toBeInTheDocument();
+    expect(within(card).getByText("90 (37.5%)")).toBeInTheDocument();
+  });
+
+  it("records the library versions that produced the score", async () => {
+    const user = await renderCard();
+    const card = cardRoot();
+    await user.click(within(card).getByRole("button", { name: /Library versions/i }));
+
+    expect(await within(card).findByText("1.6.1")).toBeInTheDocument();
+    // An absent library explains an absent model, so record it as absent.
+    expect(within(card).getByText("not installed")).toBeInTheDocument();
+  });
+});
+
+describe("imbalanced runs", () => {
+  beforeEach(stubApi);
+
+  it("warns about class imbalance instead of showing a flattering accuracy", async () => {
+    const user = userEvent.setup();
+    pollSequence([
+      {
+        state: "completed",
+        progress: 100,
+        result: completedResult({
+          all_model_scores: { RandomForest: { accuracy: 0.95, f1_macro: 0.49, balanced_accuracy: 0.5 } },
+          imbalance: {
+            imbalanced: true,
+            severe: true,
+            ratio: 19,
+            warnings: ["Class imbalance: 'no' is 95.0% of rows (19.0:1 against the rarest class)."],
+            distribution: [
+              { label: "no", count: 190, share: 0.95 },
+              { label: "yes", count: 10, share: 0.05 },
+            ],
+          },
+          class_weighting: { RandomForest: "class_weight=balanced" },
+          health: {
+            verdict: "unreliable",
+            headline: "This model is not better than guessing",
+            metric: "f1_macro",
+            metric_label: "macro F1",
+            score: 0.49,
+            baseline: 0.487,
+            reasons: [
+              "Accuracy looks high at 95.0%, but that is what a constant predictor scores on this target.",
+            ],
+          },
+        }),
+      },
+    ]);
+    render(<UploadPage />);
+    await chooseFile(user);
+    await trainWithTarget(user);
+
+    expect(await screen.findByText(/Class imbalance: 'no' is 95.0% of rows/i)).toBeInTheDocument();
+    expect(screen.getByText(/what a constant predictor scores/i)).toBeInTheDocument();
+    expect(screen.getByText(/not better than guessing/i)).toBeInTheDocument();
+    // Named per strategy, with the model it applied to, not repeated per model.
+    expect(screen.getByText("class_weight=balanced (RandomForest)")).toBeInTheDocument();
+  });
+});
+
+// --- training options ---------------------------------------------------
+
+describe("training options", () => {
+  beforeEach(stubApi);
+
+  it("sends a tuning budget and the SMOTE choice with the job", async () => {
+    const user = userEvent.setup();
+    pollSequence([{ state: "completed", progress: 100, result: completedResult() }]);
+    render(<UploadPage />);
+
+    await chooseFile(user);
+    await user.selectOptions(screen.getByLabelText(/Hyperparameter search/i), "120");
+    await user.click(screen.getByRole("checkbox", { name: /Oversample the minority class/i }));
+    await trainWithTarget(user);
+
+    await waitFor(() => expect(api.startUploadJob).toHaveBeenCalled());
+    const formData = api.startUploadJob.mock.calls[0][0];
+    expect(formData.get("tuning_budget_seconds")).toBe("120");
+    expect(formData.get("use_smote")).toBe("true");
+  });
+
+  it("defaults to library defaults and no oversampling", async () => {
+    const user = userEvent.setup();
+    pollSequence([{ state: "completed", progress: 100, result: completedResult() }]);
+    render(<UploadPage />);
+
+    await chooseFile(user);
+    await trainWithTarget(user);
+
+    await waitFor(() => expect(api.startUploadJob).toHaveBeenCalled());
+    const formData = api.startUploadJob.mock.calls[0][0];
+    expect(formData.get("tuning_budget_seconds")).toBe("0");
+    expect(formData.get("use_smote")).toBe("false");
   });
 });

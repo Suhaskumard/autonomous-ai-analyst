@@ -14,3 +14,8 @@ google-genai
 python-dotenv
 pydantic-settings
 sqlmodel
+# Phase 4: a broader model registry and SMOTE oversampling. CatBoost is also
+# supported when installed, but is not pinned here: the wheel is ~100 MB and
+# LightGBM covers the same ground at a fraction of the install cost.
+lightgbm
+imbalanced-learn

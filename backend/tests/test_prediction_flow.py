@@ -106,11 +106,22 @@ def test_regression_predictions_have_no_probabilities(client, fixture_csv):
     assert "class_probabilities" not in body["rows"][0]
 
 
-def test_ensemble_predictions_report_no_confidence(client, fixture_csv, sample_csv):
-    """A majority vote has no calibrated probability to report."""
+def test_ensemble_predictions_now_carry_confidence(client, fixture_csv, sample_csv):
+    """A weighted soft vote *does* have a probability, unlike the old mode vote.
+
+    The ensemble used to be a majority vote over raw predictions, which has no
+    calibrated probability to report. It is now a VotingClassifier averaging
+    member probabilities, so confidence comes back like any other model's.
+    """
     job = upload_and_wait(client, fixture_csv("clean_classification.csv"), mode="ensemble")
+    result = job["result"]
+    assert result["selected_model"] == "Ensemble"
+
     body = client.post(
-        f"/api/predict/{job['result']['run_key']}", files={"file": ("p.csv", io.BytesIO(sample_csv), "text/csv")}
+        f"/api/predict/{result['run_key']}", files={"file": ("p.csv", io.BytesIO(sample_csv), "text/csv")}
     ).json()
-    assert body["confidences"] is None
+
+    assert body["confidences"] is not None
+    assert all(0.0 <= c <= 1.0 for c in body["confidences"])
+    assert len(body["confidences"]) == len(body["predictions"])
     assert all(row["prediction"] in {"yes", "no"} for row in body["rows"])

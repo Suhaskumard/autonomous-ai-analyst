@@ -61,6 +61,12 @@ def isolated_storage(tmp_path, monkeypatch):
     from config import settings
 
     monkeypatch.setattr(settings, "database_url", f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    # Cross-validation multiplies every fit by the fold count, so a full
+    # ten-candidate sweep costs ~12s per pipeline run and most tests here are
+    # exercising plumbing, not model breadth. Four candidates keeps every code
+    # path live at a fraction of the cost; test_model_selection.py clears the
+    # cap where the breadth itself is what is under test.
+    monkeypatch.setattr(settings, "max_candidate_models", 4)
     db.reset_engine()
     db.init_db()
 

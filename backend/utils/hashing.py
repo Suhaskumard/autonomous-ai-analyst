@@ -11,13 +11,18 @@ def run_cache_key(
     manual_model: str | None,
     target_column: str | None,
     pipeline_version: str,
+    tuning_budget_seconds: float = 0.0,
+    use_smote: bool = False,
 ) -> str:
     """Content-address the whole run configuration, not just the file.
 
     Keying on the dataset hash alone meant re-uploading the same CSV in
     Ensemble mode after Auto silently returned the Auto result, so the mode
-    selector appeared to do nothing. Including the pipeline version also
-    invalidates artifacts automatically when preprocessing changes.
+    selector appeared to do nothing. Every knob that changes the result belongs
+    here for the same reason — asking for a tuning budget or for SMOTE must
+    retrain rather than replay the untuned, unbalanced artifact. Including the
+    pipeline version also invalidates artifacts automatically when
+    preprocessing changes.
     """
     parts = [
         dataset_hash,
@@ -25,5 +30,7 @@ def run_cache_key(
         (manual_model or "").strip(),
         (target_column or "").strip(),
         pipeline_version,
+        f"tune={float(tuning_budget_seconds or 0):g}",
+        f"smote={bool(use_smote)}",
     ]
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()

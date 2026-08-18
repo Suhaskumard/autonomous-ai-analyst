@@ -11,13 +11,14 @@ from config import settings
 from exceptions import DatasetTooLargeError, DatasetTooSmallError, PipelineError
 from logging_config import job_id_var
 from ml.diagnostics import build_diagnostics
-from ml.ensemble import ensemble_predict
-from ml.evaluate import evaluate_classification, evaluate_regression
+from ml.evaluate import per_class_report
 from ml.explain import explain_pipeline
-from ml.health import assess_run
+from ml.health import METRIC_LABEL, assess_run
+from ml.model_card import build_model_card
 from ml.preprocess import prepare_dataset
 from ml.quality import data_quality_report, remove_duplicate_rows
-from ml.train import PIPELINE_VERSION, train_models
+from ml.train import HOLDOUT_SIZE, PIPELINE_VERSION, train_models
+from ml.tuning import MAX_BUDGET_SECONDS
 from utils.hashing import run_cache_key
 from utils.helpers import (
     METADATA_DIR,
@@ -33,12 +34,6 @@ from utils.uploads import StoredUpload, read_upload_to_temp
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _select_best_model(performance_scores: dict, problem_type: str) -> str:
-    metric = "accuracy" if problem_type == "classification" else "rmse"
-    reverse = problem_type == "classification"
-    return sorted(performance_scores.keys(), key=lambda m: performance_scores[m][metric], reverse=reverse)[0]
 
 
 def _build_chart_payload(df: pd.DataFrame) -> dict:
@@ -97,6 +92,20 @@ def _result_payload(metadata: dict, status: str) -> dict:
         "mode": metadata.get("mode"),
         "selected_model": metadata.get("selected_model"),
         "all_model_scores": metadata.get("all_model_scores", {}),
+        # Phase 4: a score is a distribution plus one clean holdout number.
+        "cv_scores": metadata.get("cv_scores", {}),
+        "baseline_cv": metadata.get("baseline_cv", {}),
+        "selection_metric": metadata.get("selection_metric"),
+        "cv_folds": metadata.get("cv_folds"),
+        "holdout_rows": metadata.get("holdout_rows"),
+        "per_class": metadata.get("per_class", []),
+        "imbalance": metadata.get("imbalance", {}),
+        "class_weighting": metadata.get("class_weighting", {}),
+        "smote_used": metadata.get("smote_used", False),
+        "tuning": metadata.get("tuning", []),
+        "tuning_budget_seconds": metadata.get("tuning_budget_seconds", 0.0),
+        "ensemble_members": metadata.get("ensemble_members", []),
+        "model_card": metadata.get("model_card", {}),
         "features": metadata.get("features", []),
         "dropped_columns": metadata.get("dropped_columns", []),
         "target": metadata.get("target"),
@@ -145,6 +154,8 @@ def _run_upload_pipeline(
     manual_model: str | None,
     target_column: str | None,
     filename: str | None = None,
+    tuning_budget_seconds: float = 0.0,
+    use_smote: bool = False,
 ) -> None:
     # Every log line emitted below this point carries the job id.
     token = job_id_var.set(job_id)
@@ -159,7 +170,15 @@ def _run_upload_pipeline(
 
         # Cached artifacts belong to a full configuration, not just a file:
         # the same CSV in Ensemble mode is a different run from Auto.
-        run_key = run_cache_key(dataset_hash, mode, manual_model, target_column, PIPELINE_VERSION)
+        run_key = run_cache_key(
+            dataset_hash,
+            mode,
+            manual_model,
+            target_column,
+            PIPELINE_VERSION,
+            tuning_budget_seconds=tuning_budget_seconds,
+            use_smote=use_smote,
+        )
         logger.info("Pipeline started", extra={"run_key": run_key, "mode": mode, "target": target_column})
 
         metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
@@ -220,45 +239,62 @@ def _run_upload_pipeline(
         db.append_step(job_id, "Calculating summary statistics", 55)
         summary_stats = _calculate_summary_stats(df)
 
-        db.append_step(job_id, "Splitting train/test, then fitting preprocessing on train only", 60)
+        db.append_step(job_id, "Holding out a test set, then cross-validating every candidate", 60)
         trained = train_models(
             prepared["X"],
             prepared["y"],
             preprocessor=prepared["preprocessor"],
             mode=mode,
             manual_model=manual_model,
+            tuning_budget_seconds=tuning_budget_seconds,
+            use_smote=use_smote,
         )
         problem_type = trained["problem_type"]
         trained_models = trained["trained_models"]
         scores = trained["performance_scores"]
+        cv_scores = trained["cv_scores"]
         failed_models = trained.get("failed_models", {})
         label_encoder = trained["label_encoder"]
+        imbalance = trained.get("imbalance", {})
+        selection_metric = trained["selection_metric"]
 
-        db.append_step(job_id, f"Trained: {', '.join(trained_models.keys())}", 78)
+        db.append_step(
+            job_id,
+            f"Cross-validated {len(cv_scores)} model(s) over {trained['cv_folds']} folds; "
+            f"{trained['holdout_rows']:,} rows held out and never used for selection",
+            76,
+        )
+        for warn in imbalance.get("warnings", []):
+            db.append_step(job_id, warn, 77)
+        if trained.get("smote_used"):
+            db.append_step(job_id, "Applied SMOTE inside each fold's training rows only", 77)
+        elif use_smote and trained.get("smote_note"):
+            db.append_step(job_id, trained["smote_note"], 77)
+        for report in trained.get("tuning", []):
+            db.append_step(
+                job_id,
+                f"Tuned {report['model']} over {report['candidates']} candidates in {report['seconds']}s "
+                f"({report['scoring']} {report['best_cv_score']:.4g})",
+                78,
+            )
         if failed_models:
             db.append_step(job_id, f"Some models failed and were skipped: {', '.join(failed_models.keys())}", 80)
             logger.warning("Models failed", extra={"failed": list(failed_models)})
 
-        best_model_name = _select_best_model(scores, problem_type)
-        if mode == "ensemble":
-            selected_model_name = "Ensemble"
-            # Score the vote itself on the held-out split. Reporting the best
-            # member's score as the ensemble's would be the same kind of
-            # flattering mislabel this phase exists to remove.
-            ensemble_preds = ensemble_predict(trained_models, trained["X_test"], problem_type)
-            scores["Ensemble"] = (
-                evaluate_classification(trained["y_test"], ensemble_preds)
-                if problem_type == "classification"
-                else evaluate_regression(trained["y_test"], ensemble_preds)
-            )
-            selected_scores = scores["Ensemble"]
-            explain_source = trained_models[best_model_name]
-            selected_predictions = ensemble_preds
-        else:
-            selected_model_name = next(iter(trained_models)) if mode == "manual" else best_model_name
-            selected_scores = scores[selected_model_name]
-            explain_source = trained_models[selected_model_name]
-            selected_predictions = explain_source.predict(trained["X_test"])
+        selected_model_name = trained["selected_model"]
+        best_model_name = trained["explain_model"]
+        selected_scores = scores[selected_model_name]
+        selected_pipeline = trained_models[selected_model_name]
+        # Attribution needs a preprocessor+model Pipeline, which a vote is not.
+        explain_source = trained_models[best_model_name]
+        selected_predictions = selected_pipeline.predict(trained["X_test"])
+
+        db.append_step(
+            job_id,
+            f"Selected {selected_model_name} on cross-validated {METRIC_LABEL.get(selection_metric, selection_metric)}"
+            + (f" — {trained['ensemble_note']}" if trained.get("ensemble_note") else ""),
+            84,
+        )
 
         db.append_step(job_id, "Computing feature attribution", 86)
         feature_importance, explain_method = explain_pipeline(
@@ -276,6 +312,15 @@ def _run_upload_pipeline(
             y_test=trained["y_test"],
             failed_models=failed_models,
             n_classes=len(trained["class_names"]) if trained["class_names"] else 0,
+            cv_summary=cv_scores.get(selected_model_name, {}),
+            imbalance=imbalance,
+            holdout_rows=trained["holdout_rows"],
+        )
+
+        per_class = (
+            per_class_report(trained["y_test"], selected_predictions, trained["class_names"])
+            if problem_type == "classification"
+            else []
         )
 
         db.append_step(job_id, "Building diagnostics (confusion/residuals, correlations)", 91)
@@ -288,6 +333,7 @@ def _run_upload_pipeline(
         )
 
         db.append_step(job_id, "Generating insights", 92)
+        cv_selected = cv_scores.get(selected_model_name, {}).get(selection_metric, {})
         insights = [
             f"Target column: '{target_col}'"
             + (" (auto-detected)." if prepared["target_auto_detected"] else " (chosen by you)."),
@@ -296,6 +342,45 @@ def _run_upload_pipeline(
             f"Models trained: {', '.join(trained_models.keys())}.",
             "Preprocessing was fitted on the training split only, so reported scores are leak-free.",
         ]
+        metric_label = METRIC_LABEL.get(selection_metric, selection_metric)
+        if cv_selected:
+            insights.append(
+                f"Selected on cross-validated {metric_label}: "
+                f"{cv_selected['mean']:.4g} +/- {cv_selected['std']:.4g} over {trained['cv_folds']} folds, "
+                "not on a single lucky split."
+            )
+            insights.append(
+                f"{trained['holdout_rows']:,} rows were held out of cross-validation, tuning, and "
+                "selection entirely, and scored once at the end."
+            )
+        if problem_type == "classification":
+            insights.append(
+                "Accuracy is reported but not selected on - macro F1 is, so a majority-class "
+                "predictor cannot win on an imbalanced target."
+            )
+        insights.extend(imbalance.get("warnings", []))
+        if trained.get("class_weighting"):
+            insights.append(
+                "Class weighting applied to: "
+                + ", ".join(f"{name} ({how})" for name, how in trained["class_weighting"].items())
+                + "."
+            )
+        if trained.get("smote_used"):
+            insights.append("SMOTE oversampling was applied inside each fold's training rows only.")
+        elif use_smote and trained.get("smote_note"):
+            insights.append(trained["smote_note"])
+        if trained.get("ensemble_members"):
+            insights.append(
+                "Ensemble members, weighted by how far each beat the baseline: "
+                f"{', '.join(trained['ensemble_members'])}."
+            )
+        if trained.get("ensemble_note"):
+            insights.append(trained["ensemble_note"])
+        for report in trained.get("tuning", []):
+            insights.append(
+                f"Tuned {report['model']}: {report['best_params']} "
+                f"({report['candidates']} candidates, {report['seconds']}s)."
+            )
         if feature_importance:
             method_label = "SHAP" if explain_method == "shap" else "model-native"
             insights.append(
@@ -308,11 +393,13 @@ def _run_upload_pipeline(
         insights.extend([f"Quality warning: {w}" for w in quality["warnings"]])
 
         db.append_step(job_id, "Saving model bundle and metadata", 97)
-        # One artifact: the fitted Pipeline(s) already contain preprocessing, so
+        # One artifact: the fitted Pipeline already contains preprocessing, so
         # serving no longer has to re-apply a separately stored transformer.
+        # An ensemble is now a fitted VotingClassifier/VotingRegressor - one
+        # estimator like any other, which is why "kind" is always "single".
         bundle = {
-            "kind": "ensemble" if mode == "ensemble" else "single",
-            "pipelines": trained_models if mode == "ensemble" else {selected_model_name: explain_source},
+            "kind": "single",
+            "pipelines": {selected_model_name: selected_pipeline},
             "problem_type": problem_type,
             "label_encoder": label_encoder,
             "feature_columns": prepared["feature_columns"],
@@ -320,6 +407,25 @@ def _run_upload_pipeline(
         }
         joblib.dump(bundle, model_path)
         df.to_csv(data_snapshot_path, index=False)
+
+        timestamp = now_utc_iso()
+        model_card = build_model_card(
+            run_key=run_key,
+            timestamp=timestamp,
+            dataset={
+                "filename": filename,
+                "dataset_hash": dataset_hash,
+                "rows": int(df.shape[0]),
+                "columns": int(df.shape[1]),
+                "mode": mode,
+                "holdout_fraction": HOLDOUT_SIZE,
+            },
+            prepared=prepared,
+            trained=trained,
+            health=health,
+            explanation_method=explain_method,
+            feature_importance=feature_importance,
+        )
 
         metadata = {
             "run_key": run_key,
@@ -331,6 +437,19 @@ def _run_upload_pipeline(
             "mode": mode,
             "selected_model": selected_model_name,
             "all_model_scores": scores,
+            "cv_scores": cv_scores,
+            "baseline_cv": trained.get("baseline_cv", {}),
+            "selection_metric": selection_metric,
+            "cv_folds": trained["cv_folds"],
+            "holdout_rows": trained["holdout_rows"],
+            "per_class": per_class,
+            "imbalance": imbalance,
+            "class_weighting": trained.get("class_weighting", {}),
+            "smote_used": trained.get("smote_used", False),
+            "tuning": trained.get("tuning", []),
+            "tuning_budget_seconds": trained.get("tuning_budget_seconds", 0.0),
+            "ensemble_members": trained.get("ensemble_members", []),
+            "model_card": model_card,
             "features": prepared["feature_columns"],
             "dropped_columns": prepared["dropped_columns"],
             "target": target_col,
@@ -339,7 +458,7 @@ def _run_upload_pipeline(
             "failed_models": failed_models,
             "health": health,
             "explanation_method": explain_method,
-            "timestamp": now_utc_iso(),
+            "timestamp": timestamp,
             "data_snapshot_path": str(data_snapshot_path),
             "quality_report": quality,
             "charts": chart_payload,
@@ -391,15 +510,33 @@ async def upload_dataset(
     mode: str = Form("auto"),
     manual_model: str | None = Form(None),
     target_column: str | None = Form(None),
+    tuning_budget_seconds: float = Form(0.0),
+    use_smote: bool = Form(False),
 ):
     # Streams to a temp file under a byte/row/type ceiling instead of reading
     # the whole upload into RAM. Raises 400/413 before any work is queued.
     stored = await read_upload_to_temp(file)
     target_column = (target_column or "").strip() or None
+    # The budget is the user's to set, but not without a ceiling: this runs in
+    # the web process, so an unbounded search would hold a worker indefinitely.
+    tuning_budget_seconds = float(min(max(tuning_budget_seconds, 0.0), MAX_BUDGET_SECONDS))
     job_id = str(uuid4())
     db.create_job(job_id, "Upload received")
-    logger.info("Upload accepted", extra={"job": job_id, "mode": mode, "bytes": stored.size})
-    background_tasks.add_task(_run_upload_pipeline, job_id, stored, mode, manual_model, target_column, file.filename)
+    logger.info(
+        "Upload accepted",
+        extra={"job": job_id, "mode": mode, "bytes": stored.size, "tuning_budget": tuning_budget_seconds},
+    )
+    background_tasks.add_task(
+        _run_upload_pipeline,
+        job_id,
+        stored,
+        mode,
+        manual_model,
+        target_column,
+        file.filename,
+        tuning_budget_seconds,
+        use_smote,
+    )
     return {
         "job_id": job_id,
         "state": "queued",

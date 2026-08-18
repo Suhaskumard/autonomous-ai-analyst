@@ -21,6 +21,8 @@ export default function UploadPage() {
   const [profileError, setProfileError] = useState("");
   const [mode, setMode] = useState("auto");
   const [manualModel, setManualModel] = useState("RandomForest");
+  const [tuningBudget, setTuningBudget] = useState(0);
+  const [useSmote, setUseSmote] = useState(false);
 
   const { loading, status, result, error, errorKind, run, cancel, reset, showResult } = useUploadJob();
   const profileControllerRef = useRef(null);
@@ -54,9 +56,13 @@ export default function UploadPage() {
       formData.append("mode", mode);
       if (mode === "manual") formData.append("manual_model", manualModel);
       if (targetColumn) formData.append("target_column", targetColumn);
+      // Both are part of the cache key server-side, so changing either
+      // retrains rather than replaying the previous artifact.
+      formData.append("tuning_budget_seconds", String(tuningBudget));
+      formData.append("use_smote", String(useSmote));
       run(formData);
     },
-    [file, mode, manualModel, run]
+    [file, mode, manualModel, tuningBudget, useSmote, run]
   );
 
   const clearFile = useCallback(() => {
@@ -129,8 +135,12 @@ export default function UploadPage() {
             profile={profile}
             mode={mode}
             manualModel={manualModel}
+            tuningBudget={tuningBudget}
+            useSmote={useSmote}
             onModeChange={setMode}
             onManualModelChange={setManualModel}
+            onTuningBudgetChange={setTuningBudget}
+            onUseSmoteChange={setUseSmote}
             onTrain={startTraining}
             onCancel={clearFile}
             isTraining={loading}

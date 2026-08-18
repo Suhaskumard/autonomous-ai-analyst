@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import DatasetSummary from "./DatasetSummary";
+import ModelCard from "./ModelCard";
 import { CategoryBar, FeatureImportanceChart, NumericHistogram } from "./charts/DistributionCharts";
 import { ConfusionMatrix, CorrelationHeatmap, ResidualPlot } from "./charts/DiagnosticCharts";
 import { ModelScores } from "./charts/ModelScoresChart";
@@ -34,8 +35,11 @@ function HealthBanner({ health }) {
   const color = VERDICT_COLOR[health.verdict];
   const Icon = config.icon;
   const isPercent = health.metric === "accuracy";
+  const label = health.metric_label || health.metric || "score";
   const format = (value) =>
     typeof value !== "number" ? "—" : isPercent ? `${(value * 100).toFixed(1)}%` : formatNumber(value, 4);
+  const constantPredictor =
+    health.metric === "rmse" ? "always predicting the mean" : "always predicting the most common class";
 
   return (
     <div className="card fade-in" style={{ borderLeft: `4px solid ${color}`, background: `${color}0f`, marginBottom: 24 }}>
@@ -49,8 +53,10 @@ function HealthBanner({ health }) {
             <span className="banner-tag">{config.label}</span>
           </div>
           <p style={{ margin: "8px 0 12px", fontSize: "0.9rem", color: "var(--text-secondary)" }}>
-            {`${isPercent ? "Accuracy" : "RMSE"} ${format(health.score)} vs naive baseline ${format(health.baseline)}`}
-            {isPercent ? " (always predicting the most common class)" : " (always predicting the mean)"}
+            {/* The verdict is made on macro F1, so name the metric rather than
+                assuming it is accuracy — that assumption was the bug. */}
+            {`${sentenceCase(label)} ${format(health.score)} vs naive baseline ${format(health.baseline)}`}
+            {` (${constantPredictor})`}
           </p>
           {(health.reasons || []).length > 0 && (
             <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -84,6 +90,38 @@ function Provenance({ status, message }) {
       <span>{message || note}</span>
     </p>
   );
+}
+
+// Order matters: the first metrics shown are the ones that survive imbalance,
+// so the tile row cannot lead with a flattering accuracy again.
+const HEADLINE_ORDER = {
+  classification: ["f1_macro", "balanced_accuracy", "accuracy", "roc_auc", "precision_macro", "recall_macro"],
+  regression: ["rmse", "mae", "r2", "mape"],
+};
+
+const METRIC_LABELS = {
+  f1_macro: "macro F1",
+  f1_weighted: "weighted F1",
+  balanced_accuracy: "balanced accuracy",
+  precision_macro: "macro precision",
+  recall_macro: "macro recall",
+  roc_auc: "ROC-AUC",
+  r2: "R²",
+  mape: "MAPE %",
+  rmse: "RMSE",
+  mae: "MAE",
+  mse: "MSE",
+};
+
+function headlineMetrics(performance, problemType) {
+  const order = HEADLINE_ORDER[problemType] || [];
+  const ranked = order.filter((metric) => performance[metric] !== undefined).map((m) => [m, performance[m]]);
+  const rest = Object.entries(performance).filter(([metric]) => !order.includes(metric));
+  return [...ranked, ...rest].slice(0, 6);
+}
+
+function sentenceCase(text) {
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
 }
 
 function MetricCard({ label, value, icon: Icon, color }) {
@@ -172,16 +210,18 @@ export default function Dashboard({ result }) {
         />
         <MetricCard label="Problem domain" value={result.problem_type} icon={Target} />
         <MetricCard label="Target column" value={result.target || "—"} icon={Crosshair} />
-        {Object.entries(performance).map(([metric, value]) => (
-          <MetricCard key={metric} label={metric.replace("_", " ")} value={value} icon={Info} />
+        {headlineMetrics(performance, result.problem_type).map(([metric, value]) => (
+          <MetricCard key={metric} label={METRIC_LABELS[metric] || metric.replace(/_/g, " ")} value={value} icon={Info} />
         ))}
       </div>
 
       <div className="grid-2">
         <FeatureImportanceChart data={result.feature_importance} method={result.explanation_method} />
         <ModelScores
-          scores={result.all_model_scores}
-          problemType={result.problem_type}
+          cvScores={result.cv_scores}
+          holdoutScores={result.all_model_scores}
+          baselineCv={result.baseline_cv}
+          selectionMetric={result.selection_metric}
           selectedModel={result.selected_model}
         />
       </div>
@@ -223,6 +263,8 @@ export default function Dashboard({ result }) {
         </div>
         <ParsingNotes report={result.parse_report} quality={result.quality_report} />
       </div>
+
+      <ModelCard result={result} />
 
       <DatasetSummary result={result} />
 

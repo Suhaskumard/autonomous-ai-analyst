@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     max_upload_mb: int = Field(default=50, gt=0)
     max_upload_rows: int = Field(default=1_000_000, gt=0)
 
+    # --- Training cost -----------------------------------------------------
+    # Cross-validation multiplies every fit by the fold count, so breadth is no
+    # longer free: ten candidates over five folds is fifty fits. This caps how
+    # many candidates a run may try (0 = no cap, use the whole registry) for
+    # operators who would rather have a fast answer than an exhaustive one.
+    max_candidate_models: int = Field(default=0, ge=0)
+
     # --- Persistence -------------------------------------------------------
     # Jobs and run history live here so they survive a restart and are visible
     # to every worker process.

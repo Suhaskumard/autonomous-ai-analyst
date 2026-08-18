@@ -13,7 +13,7 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, TargetEncoder
 
 from exceptions import TargetValidationError
 
@@ -21,6 +21,13 @@ from exceptions import TargetValidationError
 # levels are folded into a single "infrequent" column. Without a ceiling, one
 # free-text column explodes into thousands of features and OOMs the fit.
 MAX_ONEHOT_CATEGORIES = 50
+
+# Above this many distinct values, one-hot encoding is the wrong tool: it makes
+# a wide sparse block whose rare columns carry almost no signal, and capping it
+# throws the tail away. Such columns are target-encoded instead — one dense
+# column per class, fitted with sklearn's internal cross-fitting so the encoding
+# of a row never uses that row's own target.
+TARGET_ENCODE_MIN_CATEGORIES = 25
 
 # A feature column this text-like is dropped rather than encoded.
 FREE_TEXT_UNIQUE_RATIO = 0.5
@@ -104,24 +111,33 @@ def validate_target(y: pd.Series, target_col: str, auto_detected: bool) -> None:
         )
 
 
-def split_feature_types(X: pd.DataFrame) -> tuple[list[str], list[str], list[str]]:
-    """Sort features into (numeric, categorical, dropped-as-free-text)."""
+def split_feature_types(X: pd.DataFrame) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Sort features into (numeric, one-hot, target-encoded, dropped-as-free-text)."""
     numeric = X.select_dtypes(include=["number", "bool"]).columns.tolist()
     candidates = [c for c in X.columns if c not in numeric]
 
     categorical: list[str] = []
+    high_cardinality: list[str] = []
     dropped: list[str] = []
     for col in candidates:
-        _, ratio, mean_len = _text_profile(X[col])
+        n_unique, ratio, mean_len = _text_profile(X[col])
         if ratio > FREE_TEXT_UNIQUE_RATIO or mean_len > FREE_TEXT_MEAN_LENGTH:
             dropped.append(col)
+        elif n_unique >= TARGET_ENCODE_MIN_CATEGORIES:
+            high_cardinality.append(col)
         else:
             categorical.append(col)
-    return numeric, categorical, dropped
+    return numeric, categorical, high_cardinality, dropped
 
 
-def build_preprocessor(num_cols: list[str], cat_cols: list[str]) -> ColumnTransformer:
+def build_preprocessor(
+    num_cols: list[str],
+    cat_cols: list[str],
+    high_cardinality_cols: list[str] | None = None,
+) -> ColumnTransformer:
     """An *unfitted* ColumnTransformer. train.py fits it on the training split."""
+    high_cardinality_cols = high_cardinality_cols or []
+
     numeric_pipeline = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="mean")),
@@ -141,11 +157,25 @@ def build_preprocessor(num_cols: list[str], cat_cols: list[str]) -> ColumnTransf
             ),
         ]
     )
+    # TargetEncoder is supervised: it needs y, which ColumnTransformer forwards
+    # from Pipeline.fit. Its internal cross-fitting is what stops a category's
+    # encoding from memorising the rows it was computed from.
+    target_encoded_pipeline = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("target", TargetEncoder(target_type="auto", random_state=42)),
+        ]
+    )
+
+    transformers = [
+        ("num", numeric_pipeline, num_cols),
+        ("cat", categorical_pipeline, cat_cols),
+    ]
+    if high_cardinality_cols:
+        transformers.append(("cat_high", target_encoded_pipeline, high_cardinality_cols))
+
     return ColumnTransformer(
-        transformers=[
-            ("num", numeric_pipeline, num_cols),
-            ("cat", categorical_pipeline, cat_cols),
-        ],
+        transformers=transformers,
         remainder="drop",
         verbose_feature_names_out=True,
     )
@@ -170,14 +200,14 @@ def prepare_dataset(df: pd.DataFrame, target_column: str | None = None) -> dict[
     if X.shape[1] == 0:
         raise TargetValidationError("The dataset has no feature columns once the target is removed.")
 
-    num_cols, cat_cols, dropped_cols = split_feature_types(X)
-    if not num_cols and not cat_cols:
+    num_cols, cat_cols, high_card_cols, dropped_cols = split_feature_types(X)
+    if not num_cols and not cat_cols and not high_card_cols:
         raise TargetValidationError(
             "Every feature column looks like free text or a unique identifier, so there is nothing usable to train on."
         )
 
-    X = X[num_cols + cat_cols]
-    high_cardinality = [c for c in cat_cols if X[c].nunique() > MAX_ONEHOT_CATEGORIES]
+    X = X[num_cols + cat_cols + high_card_cols]
+    capped = [c for c in cat_cols if X[c].nunique() > MAX_ONEHOT_CATEGORIES]
 
     warnings: list[str] = []
     if dropped_cols:
@@ -185,10 +215,16 @@ def prepare_dataset(df: pd.DataFrame, target_column: str | None = None) -> dict[
             f"Dropped {len(dropped_cols)} free-text/identifier column(s) that cannot be encoded: "
             f"{', '.join(dropped_cols[:5])}{'...' if len(dropped_cols) > 5 else ''}."
         )
-    if high_cardinality:
+    if high_card_cols:
+        warnings.append(
+            f"Target-encoded {len(high_card_cols)} high-cardinality column(s) instead of one-hot: "
+            f"{', '.join(high_card_cols[:5])}{'...' if len(high_card_cols) > 5 else ''}. "
+            "Each becomes a dense column fitted with internal cross-fitting, so no row sees its own target."
+        )
+    if capped:
         warnings.append(
             f"Capped one-hot encoding at {MAX_ONEHOT_CATEGORIES} categories for "
-            f"{', '.join(high_cardinality[:5])}{'...' if len(high_cardinality) > 5 else ''}; "
+            f"{', '.join(capped[:5])}{'...' if len(capped) > 5 else ''}; "
             "rarer values are grouped as 'infrequent'."
         )
     if dropped_target_rows:
@@ -200,9 +236,10 @@ def prepare_dataset(df: pd.DataFrame, target_column: str | None = None) -> dict[
         "target_col": target_col,
         "target_auto_detected": auto_detected,
         "dropped_target_rows": dropped_target_rows,
-        "preprocessor": build_preprocessor(num_cols, cat_cols),
+        "preprocessor": build_preprocessor(num_cols, cat_cols, high_card_cols),
         "numeric_columns": num_cols,
         "categorical_columns": cat_cols,
+        "high_cardinality_columns": high_card_cols,
         "dropped_columns": dropped_cols,
         "feature_columns": X.columns.tolist(),
         "warnings": warnings,
