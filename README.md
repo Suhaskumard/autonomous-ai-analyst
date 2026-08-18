@@ -25,6 +25,20 @@ An enterprise-grade, full-stack autonomous data science system. It automatically
   - **Health verdict**: every run is scored against a naive baseline (majority class / mean), so a model that does not beat guessing is labeled as such rather than as the "Optimized Model".
 - **Performance Caching**:
   - Runs are content-addressed on the whole configuration — dataset hash + mode + manual model + target + pipeline version — so changing the mode retrains instead of silently replaying the previous result.
+  - A replayed run says so. The dashboard states whether a result was freshly trained, served from cache, or reopened from the workspace.
+- **See the data before you train it**:
+  - A per-column profile — type, missing %, cardinality, distribution sparkline — is computed on upload, before anything is fitted. The target picker lives on that same screen, so choosing a target is an informed decision rather than a bare dropdown.
+  - Columns that cannot serve as a target are disabled with the reason attached.
+- **Every number is drawn, not just computed**:
+  - Histograms, category bars, feature importances, and per-model scores render as real charts (Recharts) with axes and scales, plus a confusion matrix for classification or a residual plot for regression, and a correlation heatmap.
+  - Every chart has a table view — the numbers are readable without relying on colour, and the palette is validated for contrast and colour-vision deficiency on this surface.
+  - A per-column statistics table shows what was actually trained on: the trained shape, classes, dropped columns, duplicates removed, and the mean/median/range/spread of each column.
+- **Dataset workspace**:
+  - Past runs survive a refresh and a restart. Reopen one into the dashboard, expand a lightweight summary of its health and drivers, compare model scores across up to four runs, or delete a run and every artifact belonging to it.
+- **Prediction flow**:
+  - Upload a CSV or paste a single row. Results come back as a table with class probabilities and confidence, downloadable as CSV.
+- **Honest parsing**:
+  - Malformed rows are counted and reported rather than silently dropped, and text is Unicode-normalised instead of stripped to ASCII — a Japanese or Arabic dataset trains without mangling.
 
 ---
 
@@ -35,12 +49,17 @@ backend/
   routes/
     chat.py       <-- Advanced Gemini Code Execution Engine
     upload.py     <-- Pipeline orchestration & Caching
-    predict.py    <-- Inference API
+    predict.py    <-- Inference API (batch + single row)
+    profile.py    <-- Profile a CSV without training it
+    runs.py       <-- Run registry: list, reopen, compare, delete
+    insights.py   <-- Lightweight per-run summary
   ml/             <-- Core Analytical Engine
     preprocess.py <-- Target validation, feature typing (fits nothing)
     train.py      <-- Split-then-fit Pipelines, label encoding
     explain.py    <-- Name-aligned feature attribution
     health.py     <-- Baseline comparison / result verdict
+    profile.py    <-- Per-column profile served before training
+    diagnostics.py<-- Confusion matrix, residuals, correlations
     quality.py, evaluate.py, ensemble.py
   utils/
     security.py   <-- Artifact-key validation and path resolution
@@ -57,10 +76,20 @@ backend/
 
 frontend/
   src/
-    styles.css    <-- Premium Design System
-  components/     <-- Modern React Components (Lucide-powered)
-  pages/          <-- Unified Analytical Workflows
-  tests/          <-- Vitest + Testing Library
+    styles.css      <-- Premium Design System
+    components.css  <-- Tables, charts, workspace, profile
+  components/
+    DataProfile.jsx    <-- Pre-training column profile + target picker
+    Dashboard.jsx      <-- Result surface: health, charts, summary
+    DatasetSummary.jsx <-- Per-column statistics and run provenance
+    Workspace.jsx      <-- Past runs: reopen, compare, delete
+    PredictPanel.jsx   <-- CSV or single-row inference, CSV download
+    ChatBox.jsx, ErrorBoundary.jsx
+    charts/         <-- Recharts components on one validated palette
+  hooks/
+    useUploadJob.js <-- Cancellable, backed-off, bounded polling
+  pages/            <-- Unified Analytical Workflows
+  tests/            <-- Vitest + Testing Library
 
 .github/workflows/ci.yml   <-- lint, format, tests, build, image build, secret scan
 docker-compose.yml         <-- one-command startup

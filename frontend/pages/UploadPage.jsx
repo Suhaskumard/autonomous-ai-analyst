@@ -1,124 +1,192 @@
-import React, { useState } from "react";
-import { Layers, Activity, AlertCircle, CheckCircle2 } from "lucide-react";
-import UploadForm from "../components/UploadForm";
-import Dashboard from "../components/Dashboard";
+import React, { useCallback, useRef, useState } from "react";
+import { Activity, AlertCircle, CheckCircle2, Cpu, Loader2, Upload, X } from "lucide-react";
+
 import ChatBox from "../components/ChatBox";
+import Dashboard from "../components/Dashboard";
+import DataProfile from "../components/DataProfile";
 import ErrorBoundary from "../components/ErrorBoundary";
 import PredictPanel from "../components/PredictPanel";
-import { chatQuery, getUploadJobStatus, predictDataset, startUploadJob } from "../services/api";
+import Workspace from "../components/Workspace";
+import useUploadJob from "../hooks/useUploadJob";
+import { chatQuery, profileDataset } from "../services/api";
 
+/**
+ * The flow: pick a file → look at what is in it and choose a target → train →
+ * dashboard. The profile step exists so the target is an informed choice.
+ */
 export default function UploadPage() {
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [error, setError] = useState("");
-  const [errorKind, setErrorKind] = useState("");
+  const [file, setFile] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [profiling, setProfiling] = useState(false);
+  const [profileError, setProfileError] = useState("");
+  const [mode, setMode] = useState("auto");
+  const [manualModel, setManualModel] = useState("RandomForest");
 
-  const handleSubmit = async (e, mode, manualModel, targetColumn) => {
-    e.preventDefault();
-    // form.elements is the standard accessor; the legacy `form.file`
-    // shorthand is browser-only and absent in jsdom.
-    const file = e.target.elements.file?.files?.[0];
-    if (!file) return;
+  const { loading, status, result, error, errorKind, run, cancel, reset, showResult } = useUploadJob();
+  const profileControllerRef = useRef(null);
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("mode", mode);
-    if (mode === "manual") formData.append("manual_model", manualModel);
-    if (targetColumn) formData.append("target_column", targetColumn);
+  const handleFileChange = useCallback(async (event) => {
+    const chosen = event.target.files?.[0];
+    setProfile(null);
+    setProfileError("");
+    setFile(chosen || null);
+    if (!chosen) return;
 
-    setLoading(true);
-    setError("");
-    setErrorKind("");
-    setJobStatus(null);
-    setResult(null);
+    profileControllerRef.current?.abort();
+    const controller = new AbortController();
+    profileControllerRef.current = controller;
+
+    setProfiling(true);
     try {
-      const start = await startUploadJob(formData);
-      const jobId = start.job_id;
-
-      let done = false;
-      while (!done) {
-        const status = await getUploadJobStatus(jobId);
-        setJobStatus(status);
-        if (status.state === "completed") {
-          setResult(status.result);
-          done = true;
-        } else if (status.state === "failed") {
-          setErrorKind(status.error_kind || "pipeline");
-          throw new Error(status.error || "Job failed.");
-        } else {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-      }
+      setProfile(await profileDataset(chosen, { signal: controller.signal }));
     } catch (err) {
-      setError(err.message || "Failed to process dataset.");
+      if (err?.name !== "AbortError") setProfileError(err.message || "Could not read that file.");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setProfiling(false);
     }
-  };
+  }, []);
+
+  const startTraining = useCallback(
+    (targetColumn) => {
+      if (!file) return;
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("mode", mode);
+      if (mode === "manual") formData.append("manual_model", manualModel);
+      if (targetColumn) formData.append("target_column", targetColumn);
+      run(formData);
+    },
+    [file, mode, manualModel, run]
+  );
+
+  const clearFile = useCallback(() => {
+    profileControllerRef.current?.abort();
+    setFile(null);
+    setProfile(null);
+    setProfileError("");
+    reset();
+  }, [reset]);
 
   return (
     <div className="app-shell">
       <header className="header fade-in">
         <h1 className="title">AUTONOMOUS AI ANALYST</h1>
         <p className="subtitle">
-          Experience the future of data science. Upload your dataset and let our advanced 
-          AI perform end-to-end analysis, modeling, and deep exploration.
+          Upload a dataset, see exactly what is in it, then let the pipeline train, explain, and score a model you can
+          actually check.
         </p>
       </header>
 
-      <div className="fade-in">
-        <UploadForm onSubmit={handleSubmit} isLoading={loading} />
-      </div>
+      {!profile && !result && (
+        <div className="card fade-in">
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+            <div className="icon-chip">
+              <Cpu size={22} />
+            </div>
+            <div>
+              <h2 style={{ margin: 0, fontSize: "1.2rem" }}>Start an analysis</h2>
+              <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--text-dim)" }}>
+                Choose a CSV. Nothing is trained until you pick a target column.
+              </p>
+            </div>
+          </div>
+
+          <div className="input-group">
+            <label htmlFor="dataset-file">Dataset file (CSV)</label>
+            <div style={{ position: "relative" }}>
+              <input
+                id="dataset-file"
+                type="file"
+                name="file"
+                accept=".csv,.tsv,.txt"
+                className="input"
+                disabled={profiling}
+                onChange={handleFileChange}
+                style={{ paddingLeft: 44 }}
+              />
+              <Upload size={18} className="input-icon" />
+            </div>
+          </div>
+
+          {profiling && (
+            <p style={{ display: "flex", gap: 8, alignItems: "center", color: "var(--text-secondary)", fontSize: "0.9rem" }}>
+              <Loader2 size={16} className="animate-spin" />
+              Reading {file?.name}…
+            </p>
+          )}
+          {profileError && (
+            <div className="notice notice-error" role="alert">
+              <AlertCircle size={16} />
+              {profileError}
+            </div>
+          )}
+        </div>
+      )}
+
+      {profile && !result && (
+        <ErrorBoundary title="The data profile could not be displayed">
+          <DataProfile
+            profile={profile}
+            mode={mode}
+            manualModel={manualModel}
+            onModeChange={setMode}
+            onManualModelChange={setManualModel}
+            onTrain={startTraining}
+            onCancel={clearFile}
+            isTraining={loading}
+          />
+        </ErrorBoundary>
+      )}
 
       {loading && (
         <div className="card fade-in" style={{ borderLeft: "4px solid var(--primary)" }}>
-          <h2 style={{ fontSize: "1.2rem", color: "var(--text-primary)" }}>
-            <Activity size={20} style={{ color: "var(--primary)" }} />
-            Processing Pipeline
-          </h2>
-          <div style={{ marginBottom: "20px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", fontSize: "0.9rem" }}>
-              <span style={{ color: "var(--text-secondary)" }}>{jobStatus?.current_step || "Initializing..."}</span>
-              <span style={{ fontWeight: "700", color: "var(--primary)" }}>{jobStatus?.progress ?? 0}%</span>
+          <div className="progress-head">
+            <h2 style={{ fontSize: "1.1rem", margin: 0, display: "flex", alignItems: "center", gap: 10 }}>
+              <Activity size={18} style={{ color: "var(--primary)" }} />
+              Processing pipeline
+            </h2>
+            <button type="button" className="btn btn-secondary btn-compact" onClick={cancel}>
+              <X size={13} />
+              Stop watching
+            </button>
+          </div>
+
+          <div style={{ marginBottom: 20 }}>
+            <div className="progress-labels">
+              <span style={{ color: "var(--text-secondary)" }}>{status?.current_step || "Initializing…"}</span>
+              <span className="tabular" style={{ fontWeight: 700, color: "var(--primary)" }}>
+                {status?.progress ?? 0}%
+              </span>
             </div>
             <div className="progress-bar">
-              <div className="progress-inner" style={{ width: `${jobStatus?.progress ?? 0}%` }} />
+              <div className="progress-inner" style={{ width: `${status?.progress ?? 0}%` }} />
             </div>
           </div>
-          
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "12px" }}>
-            {(jobStatus?.status_log || []).slice().reverse().map((item, idx) => (
-              <div key={idx} style={{ 
-                fontSize: "0.75rem", 
-                padding: "8px 12px", 
-                background: "rgba(255,255,255,0.03)", 
-                borderRadius: "8px",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                color: idx === 0 ? "var(--text-primary)" : "var(--text-dim)"
-              }}>
-                {idx === 0 ? <Activity size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
-                {item.step}
-              </div>
-            ))}
+
+          <div className="step-grid">
+            {(status?.status_log || [])
+              .slice()
+              .reverse()
+              .map((item, index) => (
+                <div key={index} className={index === 0 ? "step step-current" : "step"}>
+                  {index === 0 ? <Activity size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                  {item.step}
+                </div>
+              ))}
           </div>
         </div>
       )}
 
       {error && (
-        <div className="card fade-in" style={{ borderLeft: "4px solid #ef4444", background: "rgba(239, 68, 68, 0.05)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", color: "#f8717b" }}>
-            <AlertCircle size={24} />
+        <div className="card fade-in notice-card-error">
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+            <AlertCircle size={22} style={{ color: "#f8717b", flexShrink: 0, marginTop: 2 }} />
             <div>
-              <h3 style={{ margin: 0, fontSize: "1rem", color: "#f8717b" }}>
-                {errorKind === "target" ? "Unusable Target Column" : "Analysis Failed"}
-              </h3>
-              <p style={{ margin: 0, fontSize: "0.9rem", color: "rgba(248, 113, 123, 0.8)" }}>{error}</p>
+              <h3 style={{ margin: 0, fontSize: "1rem", color: "#f8717b" }}>{titleFor(errorKind)}</h3>
+              <p style={{ margin: "4px 0 0", fontSize: "0.9rem", color: "rgba(248,113,123,0.85)" }}>{error}</p>
               {errorKind === "target" && (
                 <p style={{ margin: "6px 0 0", fontSize: "0.85rem", color: "var(--text-dim)" }}>
-                  Pick a different column in the Target Column dropdown above and run again.
+                  Pick a different target column above and run again.
                 </p>
               )}
             </div>
@@ -128,6 +196,13 @@ export default function UploadPage() {
 
       {result && (
         <div className="fade-in">
+          <div className="result-actions">
+            <button type="button" className="btn btn-secondary" onClick={clearFile}>
+              <Upload size={14} />
+              Analyse another dataset
+            </button>
+          </div>
+
           <ErrorBoundary title="The results dashboard could not be displayed">
             <Dashboard result={result} />
           </ErrorBoundary>
@@ -138,7 +213,8 @@ export default function UploadPage() {
                 <PredictPanel
                   runKey={result.run_key}
                   features={result.features || []}
-                  onPredict={predictDataset}
+                  problemType={result.problem_type}
+                  target={result.target}
                 />
               </ErrorBoundary>
             )}
@@ -150,6 +226,25 @@ export default function UploadPage() {
           </div>
         </div>
       )}
+
+      <ErrorBoundary title="The workspace could not be displayed">
+        <Workspace onOpenRun={showResult} activeRunKey={result?.run_key} />
+      </ErrorBoundary>
     </div>
   );
+}
+
+function titleFor(kind) {
+  switch (kind) {
+    case "target":
+      return "Unusable target column";
+    case "dataset":
+      return "Dataset cannot be used";
+    case "timeout":
+      return "Still running";
+    case "network":
+      return "Could not reach the API";
+    default:
+      return "Analysis failed";
+  }
 }

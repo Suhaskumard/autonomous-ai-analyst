@@ -17,6 +17,7 @@ from logging_config import configure_logging, request_id_var
 from routes.chat import router as chat_router
 from routes.insights import router as insights_router
 from routes.predict import router as predict_router
+from routes.profile import router as profile_router
 from routes.runs import router as runs_router
 from routes.upload import router as upload_router
 
@@ -84,6 +85,7 @@ async def pipeline_error_handler(request: Request, exc: PipelineError):
 
 app.include_router(upload_router, prefix="/api", tags=["upload"])
 app.include_router(predict_router, prefix="/api", tags=["predict"])
+app.include_router(profile_router, prefix="/api", tags=["profile"])
 app.include_router(insights_router, prefix="/api", tags=["insights"])
 app.include_router(chat_router, prefix="/api", tags=["chat"])
 app.include_router(runs_router, prefix="/api", tags=["runs"])

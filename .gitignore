@@ -27,6 +27,11 @@ backend/models/saved_models/*
 !backend/models/metadata/.gitkeep
 !backend/models/saved_models/.gitkeep
 
+# Job + run registry (SQLite, plus its write-ahead log) — runtime state
+backend/models/*.db
+backend/models/*.db-shm
+backend/models/*.db-wal
+
 # Secret scanner baseline is tracked; its cache is not
 .secrets.baseline.tmp
 

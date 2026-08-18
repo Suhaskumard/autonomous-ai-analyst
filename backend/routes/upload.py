@@ -10,6 +10,7 @@ import db
 from config import settings
 from exceptions import DatasetTooLargeError, DatasetTooSmallError, PipelineError
 from logging_config import job_id_var
+from ml.diagnostics import build_diagnostics
 from ml.ensemble import ensemble_predict
 from ml.evaluate import evaluate_classification, evaluate_regression
 from ml.explain import explain_pipeline
@@ -23,7 +24,7 @@ from utils.helpers import (
     MODEL_DIR,
     ensure_storage_dirs,
     now_utc_iso,
-    read_csv_flexible,
+    read_csv_with_report,
     sanitize_text,
 )
 from utils.security import artifact_path
@@ -109,6 +110,11 @@ def _result_payload(metadata: dict, status: str) -> dict:
         "summary_stats": metadata.get("summary_stats", {}),
         "quality_report": metadata.get("quality_report", {}),
         "charts": metadata.get("charts", {}),
+        "diagnostics": metadata.get("diagnostics", {}),
+        "parse_report": metadata.get("parse_report", {}),
+        "row_count": metadata.get("row_count"),
+        "column_count": metadata.get("column_count"),
+        "timestamp": metadata.get("timestamp"),
     }
 
 
@@ -181,7 +187,8 @@ def _run_upload_pipeline(
             return
 
         db.append_step(job_id, "Reading CSV and validating shape", 12)
-        df, parse_warnings = read_csv_flexible(file_bytes)
+        df, parse_report = read_csv_with_report(file_bytes)
+        parse_warnings = parse_report.warnings
         for warn in parse_warnings:
             db.append_step(job_id, warn, 14)
         if df.shape[0] < 10 or df.shape[1] < 2:
@@ -246,10 +253,12 @@ def _run_upload_pipeline(
             )
             selected_scores = scores["Ensemble"]
             explain_source = trained_models[best_model_name]
+            selected_predictions = ensemble_preds
         else:
             selected_model_name = next(iter(trained_models)) if mode == "manual" else best_model_name
             selected_scores = scores[selected_model_name]
             explain_source = trained_models[selected_model_name]
+            selected_predictions = explain_source.predict(trained["X_test"])
 
         db.append_step(job_id, "Computing feature attribution", 86)
         feature_importance, explain_method = explain_pipeline(
@@ -267,6 +276,15 @@ def _run_upload_pipeline(
             y_test=trained["y_test"],
             failed_models=failed_models,
             n_classes=len(trained["class_names"]) if trained["class_names"] else 0,
+        )
+
+        db.append_step(job_id, "Building diagnostics (confusion/residuals, correlations)", 91)
+        diagnostics = build_diagnostics(
+            problem_type=problem_type,
+            y_test=trained["y_test"],
+            y_pred=selected_predictions,
+            class_names=trained["class_names"],
+            df=df,
         )
 
         db.append_step(job_id, "Generating insights", 92)
@@ -325,6 +343,8 @@ def _run_upload_pipeline(
             "data_snapshot_path": str(data_snapshot_path),
             "quality_report": quality,
             "charts": chart_payload,
+            "diagnostics": diagnostics,
+            "parse_report": parse_report.as_dict(),
             "feature_importance": feature_importance,
             "insights": insights,
             "summary_stats": summary_stats,
