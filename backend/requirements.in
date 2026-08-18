@@ -19,3 +19,13 @@ sqlmodel
 # LightGBM covers the same ground at a fraction of the install cost.
 lightgbm
 imbalanced-learn
+
+# Phase 6: multi-user and production.
+# rq/redis back QUEUE_BACKEND=rq, boto3 backs STORAGE_BACKEND=s3, and the
+# observability pair is optional at runtime — observability.py degrades to
+# no-ops when either is absent, so a smaller install still serves requests.
+rq
+redis
+boto3
+prometheus-client
+sentry-sdk

@@ -38,13 +38,29 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Routes import for side effects after load_dotenv(); tests assert on internals.
 "backend/main.py" = ["E402"]
+"backend/worker.py" = ["E402"]
 "backend/routes/chat.py" = ["E402"]
 "backend/tests/*" = ["B017", "E402"]
 
 [tool.ruff.lint.isort]
 # backend/ is the import root at runtime (uvicorn runs from inside it), so
 # these are first-party even though there is no top-level package directory.
-known-first-party = ["config", "db", "exceptions", "logging_config", "main", "ml", "routes", "tests", "utils"]
+known-first-party = [
+    "analyst",
+    "auth",
+    "config",
+    "db",
+    "exceptions",
+    "lifecycle",
+    "logging_config",
+    "main",
+    "ml",
+    "observability",
+    "routes",
+    "tests",
+    "utils",
+    "worker",
+]
 
 [tool.ruff.format]
 quote-style = "double"

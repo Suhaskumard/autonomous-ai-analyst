@@ -247,6 +247,10 @@ def test_deleting_a_run_removes_its_row_and_its_artifacts(client, fixture_csv, i
         isolated_storage["metadata_dir"] / f"{run_key}.json",
         isolated_storage["metadata_dir"] / f"{run_key}_data.csv",
         isolated_storage["model_dir"] / f"{run_key}_model.pkl",
+        # Phase 6 signs every bundle, so the sidecar is part of the run and has
+        # to go with it — a stale signature outliving its model is at best
+        # confusing and at worst validates the wrong file later.
+        isolated_storage["model_dir"] / f"{run_key}_model.pkl.sig",
     ]
     assert all(path.exists() for path in artifacts)
 

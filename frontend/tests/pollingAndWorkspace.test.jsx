@@ -19,6 +19,14 @@ vi.mock("../services/api", () => ({
   generateReport: vi.fn(),
   listConversations: vi.fn(),
   getConversation: vi.fn(),
+  whoAmI: vi.fn(() => Promise.resolve({ user_id: "local", email: "local@localhost", auth_enabled: false })),
+  getUsage: vi.fn(() => Promise.resolve({ calls: 0, estimated_cost_usd: 0, window_days: 30 })),
+  getPrivacyPolicy: vi.fn(),
+  deleteAllMyData: vi.fn(),
+  getApiKey: vi.fn(() => ""),
+  setApiKey: vi.fn(),
+  clearApiKey: vi.fn(),
+  UnauthorizedError: class UnauthorizedError extends Error {},
 }));
 
 import Workspace from "../components/Workspace";

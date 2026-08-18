@@ -17,6 +17,53 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select
 from config import settings
 from utils.helpers import now_utc
 
+#: The owner every artifact falls back to when auth is disabled. Phase 6's
+#: exit criterion says every stored artifact has an owner; with one trusted
+#: operator that owner is this, rather than nothing.
+LOCAL_OWNER_ID = "local"
+
+
+class UserRecord(SQLModel, table=True):
+    """An account. Authentication is a bearer API key, stored only as a hash."""
+
+    __tablename__ = "users"
+
+    user_id: str = Field(primary_key=True)
+    email: str = Field(index=True, unique=True)
+    # sha256 of the key. API keys are 32 bytes of urandom, so there is no
+    # low-entropy guess to slow down and no reason for a KDF here.
+    api_key_hash: str = Field(index=True)
+    is_active: bool = True
+    is_admin: bool = False
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    last_seen_at: datetime | None = None
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "email": self.email,
+            "is_active": self.is_active,
+            "is_admin": self.is_admin,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class UsageRecord(SQLModel, table=True):
+    """One billable LLM call, so cost is attributable per user and per run."""
+
+    __tablename__ = "llm_usage"
+
+    id: int | None = Field(default=None, primary_key=True)
+    owner_id: str = Field(default=LOCAL_OWNER_ID, index=True)
+    run_key: str | None = Field(default=None, index=True)
+    conversation_id: str | None = Field(default=None, index=True)
+    provider: str = "unknown"
+    model: str = "unknown"
+    input_tokens: int = 0
+    output_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+
 
 class JobRecord(SQLModel, table=True):
     """One upload/training job and everything the status endpoint returns."""
@@ -32,6 +79,7 @@ class JobRecord(SQLModel, table=True):
     error: str | None = None
     error_kind: str | None = None
     run_key: str | None = Field(default=None, index=True)
+    owner_id: str = Field(default=LOCAL_OWNER_ID, index=True)
     created_at: datetime = Field(default_factory=now_utc, index=True)
     updated_at: datetime = Field(default_factory=now_utc)
 
@@ -63,6 +111,7 @@ class ConversationRecord(SQLModel, table=True):
 
     conversation_id: str = Field(primary_key=True)
     run_key: str = Field(index=True)
+    owner_id: str = Field(default=LOCAL_OWNER_ID, index=True)
     title: str | None = None
     total_tokens: int = 0
     created_at: datetime = Field(default_factory=now_utc, index=True)
@@ -111,6 +160,10 @@ class RunRecord(SQLModel, table=True):
     row_count: int = 0
     column_count: int = 0
     pipeline_version: str | None = None
+    owner_id: str = Field(default=LOCAL_OWNER_ID, index=True)
+    # When the artifacts behind this run become eligible for purging. None
+    # means "keep until deleted by hand"; the retention policy sets it.
+    expires_at: datetime | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=now_utc, index=True)
 
 
@@ -132,7 +185,47 @@ def get_engine():
 
 
 def init_db() -> None:
-    SQLModel.metadata.create_all(get_engine())
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+    _add_missing_columns(engine)
+
+
+def _add_missing_columns(engine) -> None:
+    """Add columns that later phases introduced to already-created tables.
+
+    `create_all` creates missing *tables* but never alters existing ones, so a
+    database written by Phase 2 would keep serving rows with no `owner_id` and
+    every ownership query would fail. This is deliberately the narrow case it
+    handles — additive, nullable-or-defaulted columns on SQLite — rather than a
+    migration framework. Anything structural needs Alembic and a real plan.
+    """
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    with engine.begin() as connection:
+        for table in SQLModel.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present:
+                    continue
+                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column.type.compile(engine.dialect)}'
+                default = _sql_default(column)
+                if default is not None:
+                    ddl += f" DEFAULT {default}"
+                connection.execute(text(ddl))
+
+
+def _sql_default(column) -> str | None:
+    """A literal default for a backfilled column, when one is knowable."""
+    if column.name == "owner_id":
+        return f"'{LOCAL_OWNER_ID}'"
+    if column.name in {"input_tokens", "output_tokens"}:
+        return "0"
+    return None
 
 
 def reset_engine() -> None:
@@ -159,11 +252,12 @@ def session_scope() -> Iterator[Session]:
 # --- job helpers ------------------------------------------------------------
 
 
-def create_job(job_id: str, first_step: str) -> None:
+def create_job(job_id: str, first_step: str, owner_id: str = LOCAL_OWNER_ID) -> None:
     with session_scope() as session:
         session.add(
             JobRecord(
                 job_id=job_id,
+                owner_id=owner_id,
                 state="queued",
                 current_step="Queued",
                 progress=0,
@@ -172,10 +266,13 @@ def create_job(job_id: str, first_step: str) -> None:
         )
 
 
-def get_job(job_id: str) -> dict[str, Any] | None:
+def get_job(job_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+    """A job, or None when it is missing or belongs to another owner."""
     with session_scope() as session:
         job = session.get(JobRecord, job_id)
-        return job.to_status() if job else None
+        if job is None or (owner_id is not None and job.owner_id != owner_id):
+            return None
+        return job.to_status()
 
 
 def append_step(job_id: str, step: str, progress: int) -> None:
@@ -267,38 +364,205 @@ def upsert_run(**fields: Any) -> None:
             session.add(RunRecord(**fields))
 
 
-def list_runs(limit: int = 50) -> list[dict[str, Any]]:
+def list_runs(limit: int = 50, owner_id: str | None = None) -> list[dict[str, Any]]:
+    """Runs, newest first. `owner_id` scopes them; None means every owner."""
     with session_scope() as session:
-        rows = session.exec(select(RunRecord).order_by(RunRecord.created_at.desc()).limit(limit)).all()
+        query = select(RunRecord)
+        if owner_id is not None:
+            query = query.where(RunRecord.owner_id == owner_id)
+        rows = session.exec(query.order_by(RunRecord.created_at.desc()).limit(limit)).all()
         return [
             {**row.model_dump(), "created_at": row.created_at.isoformat() if row.created_at else None} for row in rows
         ]
 
 
-def get_run(run_key: str) -> dict[str, Any] | None:
+def get_run(run_key: str, owner_id: str | None = None) -> dict[str, Any] | None:
+    """A run, or None if it does not exist *or* belongs to someone else.
+
+    Same answer for both cases on purpose: distinguishing them would turn this
+    into an oracle for which run keys exist on the server.
+    """
     with session_scope() as session:
         row = session.get(RunRecord, run_key)
-        if row is None:
+        if row is None or (owner_id is not None and row.owner_id != owner_id):
             return None
         return {**row.model_dump(), "created_at": row.created_at.isoformat() if row.created_at else None}
 
 
-def create_conversation(conversation_id: str, run_key: str, title: str | None = None) -> dict[str, Any]:
+def run_owner(run_key: str) -> str | None:
+    """Who owns this run, if anyone. Used to authorise artifact access."""
     with session_scope() as session:
-        record = ConversationRecord(conversation_id=conversation_id, run_key=run_key, title=title)
+        row = session.get(RunRecord, run_key)
+        return row.owner_id if row else None
+
+
+# --- users ------------------------------------------------------------------
+
+
+def create_user(user_id: str, email: str, api_key_hash: str, is_admin: bool = False) -> dict[str, Any]:
+    with session_scope() as session:
+        record = UserRecord(user_id=user_id, email=email, api_key_hash=api_key_hash, is_admin=is_admin)
+        session.add(record)
+        session.flush()
+        return record.to_public()
+
+
+def get_user_by_email(email: str) -> dict[str, Any] | None:
+    with session_scope() as session:
+        row = session.exec(select(UserRecord).where(UserRecord.email == email)).first()
+        return row.to_public() if row else None
+
+
+def get_user_by_key_hash(api_key_hash: str) -> dict[str, Any] | None:
+    """Includes the stored hash, because the caller re-compares it explicitly."""
+    with session_scope() as session:
+        row = session.exec(select(UserRecord).where(UserRecord.api_key_hash == api_key_hash)).first()
+        if row is None:
+            return None
+        return {**row.to_public(), "api_key_hash": row.api_key_hash}
+
+
+def touch_user(user_id: str) -> None:
+    with session_scope() as session:
+        row = session.get(UserRecord, user_id)
+        if row is not None:
+            row.last_seen_at = now_utc()
+            session.add(row)
+
+
+def list_users(limit: int = 100) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        rows = session.exec(select(UserRecord).order_by(UserRecord.created_at).limit(limit)).all()
+        return [row.to_public() for row in rows]
+
+
+def count_users() -> int:
+    with session_scope() as session:
+        return len(session.exec(select(UserRecord)).all())
+
+
+def set_user_active(user_id: str, is_active: bool) -> dict[str, Any] | None:
+    with session_scope() as session:
+        row = session.get(UserRecord, user_id)
+        if row is None:
+            return None
+        row.is_active = is_active
+        session.add(row)
+        session.flush()
+        return row.to_public()
+
+
+# --- LLM usage --------------------------------------------------------------
+
+
+def record_usage(
+    owner_id: str,
+    provider: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    estimated_cost_usd: float,
+    run_key: str | None = None,
+    conversation_id: str | None = None,
+) -> None:
+    with session_scope() as session:
+        session.add(
+            UsageRecord(
+                owner_id=owner_id,
+                provider=provider,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_usd=estimated_cost_usd,
+                run_key=run_key,
+                conversation_id=conversation_id,
+            )
+        )
+
+
+def usage_summary(owner_id: str | None = None, since_days: int = 30) -> dict[str, Any]:
+    """Token and cost totals, per model, for the recent window."""
+    cutoff = now_utc() - timedelta(days=since_days)
+    with session_scope() as session:
+        query = select(UsageRecord).where(UsageRecord.created_at >= cutoff)
+        if owner_id is not None:
+            query = query.where(UsageRecord.owner_id == owner_id)
+        # Read the columns off while the session is still open. ORM instances
+        # detach when it closes and every attribute access after that raises,
+        # so the aggregation cannot be hoisted out of this block.
+        rows = [
+            (row.model, row.provider, row.input_tokens, row.output_tokens, row.estimated_cost_usd)
+            for row in session.exec(query).all()
+        ]
+
+    by_model: dict[str, dict[str, Any]] = {}
+    for model, provider, input_tokens, output_tokens, cost in rows:
+        entry = by_model.setdefault(
+            model,
+            {
+                "model": model,
+                "provider": provider,
+                "calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "estimated_cost_usd": 0.0,
+            },
+        )
+        entry["calls"] += 1
+        entry["input_tokens"] += input_tokens
+        entry["output_tokens"] += output_tokens
+        entry["estimated_cost_usd"] += cost
+
+    return {
+        "window_days": since_days,
+        "calls": len(rows),
+        "input_tokens": sum(row[2] for row in rows),
+        "output_tokens": sum(row[3] for row in rows),
+        "estimated_cost_usd": round(sum(row[4] for row in rows), 6),
+        "by_model": sorted(by_model.values(), key=lambda e: -e["estimated_cost_usd"]),
+    }
+
+
+# --- retention --------------------------------------------------------------
+
+
+def expired_runs(now: datetime | None = None) -> list[dict[str, Any]]:
+    """Runs whose expiry has passed and whose artifacts should be purged."""
+    moment = now or now_utc()
+    with session_scope() as session:
+        rows = session.exec(
+            select(RunRecord).where(RunRecord.expires_at.is_not(None), RunRecord.expires_at <= moment)
+        ).all()
+        return [{"run_key": row.run_key, "owner_id": row.owner_id} for row in rows]
+
+
+def set_run_expiry(run_key: str, expires_at: datetime | None) -> None:
+    with session_scope() as session:
+        row = session.get(RunRecord, run_key)
+        if row is not None:
+            row.expires_at = expires_at
+            session.add(row)
+
+
+def create_conversation(
+    conversation_id: str, run_key: str, title: str | None = None, owner_id: str = LOCAL_OWNER_ID
+) -> dict[str, Any]:
+    with session_scope() as session:
+        record = ConversationRecord(conversation_id=conversation_id, run_key=run_key, title=title, owner_id=owner_id)
         session.add(record)
         session.flush()
         return {"conversation_id": record.conversation_id, "run_key": record.run_key, "title": record.title}
 
 
-def get_conversation(conversation_id: str) -> dict[str, Any] | None:
+def get_conversation(conversation_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
     with session_scope() as session:
         row = session.get(ConversationRecord, conversation_id)
-        if row is None:
+        if row is None or (owner_id is not None and row.owner_id != owner_id):
             return None
         return {
             "conversation_id": row.conversation_id,
             "run_key": row.run_key,
+            "owner_id": row.owner_id,
             "title": row.title,
             "total_tokens": row.total_tokens,
             "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -306,14 +570,12 @@ def get_conversation(conversation_id: str) -> dict[str, Any] | None:
         }
 
 
-def list_conversations(run_key: str, limit: int = 20) -> list[dict[str, Any]]:
+def list_conversations(run_key: str, limit: int = 20, owner_id: str | None = None) -> list[dict[str, Any]]:
     with session_scope() as session:
-        rows = session.exec(
-            select(ConversationRecord)
-            .where(ConversationRecord.run_key == run_key)
-            .order_by(ConversationRecord.updated_at.desc())
-            .limit(limit)
-        ).all()
+        query = select(ConversationRecord).where(ConversationRecord.run_key == run_key)
+        if owner_id is not None:
+            query = query.where(ConversationRecord.owner_id == owner_id)
+        rows = session.exec(query.order_by(ConversationRecord.updated_at.desc()).limit(limit)).all()
         return [
             {
                 "conversation_id": row.conversation_id,
@@ -395,17 +657,32 @@ def delete_conversations_for_run(run_key: str) -> int:
         return removed
 
 
-def delete_run(run_key: str) -> bool:
+def delete_run(run_key: str, owner_id: str | None = None) -> bool:
     with session_scope() as session:
         row = session.get(RunRecord, run_key)
-        if row is None:
+        if row is None or (owner_id is not None and row.owner_id != owner_id):
             return False
         session.delete(row)
         return True
 
 
 __all__ = [
+    "LOCAL_OWNER_ID",
     "ConversationRecord",
+    "UsageRecord",
+    "UserRecord",
+    "count_users",
+    "create_user",
+    "expired_runs",
+    "get_user_by_email",
+    "get_user_by_key_hash",
+    "list_users",
+    "record_usage",
+    "run_owner",
+    "set_run_expiry",
+    "set_user_active",
+    "touch_user",
+    "usage_summary",
     "JobRecord",
     "MessageRecord",
     "RunRecord",

@@ -18,17 +18,20 @@ import json
 import logging
 from uuid import uuid4
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+
+import db
 from analyst import report as report_module
 from analyst.agent import run_agent, trim_to_budget
 from analyst.providers import Turn, get_provider
 from analyst.tools import build_toolset
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
-
-import db
+from auth import Principal, current_principal, owner_scope, require_owned_run
 from config import settings
+from observability import record_llm_usage
 from utils.helpers import METADATA_DIR
 from utils.security import artifact_path, validate_dataset_hash
+from utils.storage import ensure_local
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,8 @@ class ChatRequest(BaseModel):
 
 def _load_metadata(run_key: str) -> dict:
     metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
+    # No-op on local storage; fetches from the bucket on S3.
+    ensure_local(run_key)
     if not metadata_path.exists():
         raise HTTPException(status_code=404, detail="Run key not found. Upload a dataset first.")
     with metadata_path.open("r", encoding="utf-8") as f:
@@ -64,6 +69,7 @@ def _load_snapshot(run_key: str):
     import pandas as pd
 
     snapshot_path = artifact_path(METADATA_DIR, run_key, "_data.csv")
+    ensure_local(run_key)
     if not snapshot_path.exists():
         return None, None
     return snapshot_path, pd.read_csv(snapshot_path)
@@ -135,8 +141,9 @@ def _degraded(run_key: str, query: str, conversation_id: str | None, reason: str
 
 
 @router.post("/chat")
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, principal: Principal = Depends(current_principal)):
     run_key = req.resolved_key()
+    require_owned_run(run_key, principal)
     metadata = _load_metadata(run_key)
 
     query = (req.query or "").strip()
@@ -148,14 +155,14 @@ def chat(req: ChatRequest):
     # --- conversation ------------------------------------------------------
     conversation_id = req.conversation_id
     if conversation_id:
-        conversation = db.get_conversation(conversation_id)
+        conversation = db.get_conversation(conversation_id, owner_id=owner_scope(principal))
         if conversation is None:
             raise HTTPException(status_code=404, detail="Unknown conversation.")
         if conversation["run_key"] != run_key:
             raise HTTPException(status_code=400, detail="That conversation belongs to a different run.")
     else:
         conversation_id = uuid4().hex
-        db.create_conversation(conversation_id, run_key)
+        db.create_conversation(conversation_id, run_key, owner_id=principal.user_id)
         conversation = db.get_conversation(conversation_id)
 
     # --- guards ------------------------------------------------------------
@@ -221,6 +228,18 @@ def chat(req: ChatRequest):
         output_tokens=result.output_tokens,
     )
 
+    # Attributable spend: which account, which run, which model. Estimated —
+    # see observability.MODEL_RATES for why that word is doing real work.
+    estimated_cost = record_llm_usage(
+        owner_id=principal.user_id,
+        provider=provider.name,
+        model=provider.model,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        run_key=run_key,
+        conversation_id=conversation_id,
+    )
+
     return {
         "run_key": run_key,
         "conversation_id": conversation_id,
@@ -238,33 +257,58 @@ def chat(req: ChatRequest):
             "output_tokens": result.output_tokens,
             "stopped_at_step_limit": result.stopped_at_step_limit,
             "history_trimmed": trimmed,
+            "estimated_cost_usd": estimated_cost,
         },
     }
 
 
 @router.get("/chat/{run_key}/conversations")
-def conversations(run_key: str, limit: int = Query(default=20, ge=1, le=100)):
+def conversations(
+    run_key: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    principal: Principal = Depends(current_principal),
+):
     validate_dataset_hash(run_key)
-    return {"run_key": run_key, "conversations": db.list_conversations(run_key, limit=limit)}
+    require_owned_run(run_key, principal)
+    return {
+        "run_key": run_key,
+        "conversations": db.list_conversations(run_key, limit=limit, owner_id=owner_scope(principal)),
+    }
 
 
 @router.get("/chat/conversation/{conversation_id}")
-def conversation_messages(conversation_id: str):
-    conversation = db.get_conversation(conversation_id)
+def conversation_messages(conversation_id: str, principal: Principal = Depends(current_principal)):
+    conversation = db.get_conversation(conversation_id, owner_id=owner_scope(principal))
     if conversation is None:
         raise HTTPException(status_code=404, detail="Unknown conversation.")
     return {**conversation, "messages": db.list_messages(conversation_id)}
 
 
 @router.post("/report/{run_key}")
-def generate_report(run_key: str):
+def generate_report(run_key: str, principal: Principal = Depends(current_principal)):
     """One button: a full EDA sweep whose every number is computed, not written."""
     validate_dataset_hash(run_key)
+    require_owned_run(run_key, principal)
     metadata = _load_metadata(run_key)
     snapshot_path, df = _load_snapshot(run_key)
     if df is None:
         raise HTTPException(status_code=404, detail="No data snapshot for this run. Re-upload the dataset.")
 
-    report = report_module.build_report(df, metadata, snapshot_path, run_key, provider=get_provider())
+    provider = get_provider()
+    report = report_module.build_report(df, metadata, snapshot_path, run_key, provider=provider)
     report["markdown"] = report_module.render_markdown(report)
+
+    # Same accounting as /chat. A report is one large prompt rather than a
+    # multi-step agent loop, but it bills to the same key and belongs in the
+    # same total — a usage page that only counted chat would understate spend.
+    usage = report.pop("usage", None) or {}
+    if provider is not None and (usage.get("input_tokens") or usage.get("output_tokens")):
+        report["estimated_cost_usd"] = record_llm_usage(
+            owner_id=principal.user_id,
+            provider=provider.name,
+            model=provider.model,
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            run_key=run_key,
+        )
     return report

@@ -32,6 +32,14 @@ backend/models/*.db
 backend/models/*.db-shm
 backend/models/*.db-wal
 
+# Uploads handed to an out-of-process worker; deleted when the job ends
+backend/models/spool/
+
+# The artifact signing key, when one is generated rather than configured.
+# It is a secret: anything that can produce a valid signature can get a model
+# bundle past verification and into joblib.load.
+backend/models/.artifact_signing_key
+
 # Secret scanner baseline is tracked; its cache is not
 .secrets.baseline.tmp
 

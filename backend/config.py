@@ -66,6 +66,48 @@ class Settings(BaseSettings):
     chat_max_messages_per_hour: int = Field(default=40, ge=1)
     chat_token_budget: int = Field(default=120_000, ge=1000)
 
+    # --- Multi-user (Phase 6) ----------------------------------------------
+    # Off by default: everything before this phase assumed one trusted operator
+    # on localhost, and turning auth on by default would break that install for
+    # no benefit. When off, a single implicit local owner owns every artifact,
+    # so "every artifact has an owner" holds either way.
+    auth_enabled: bool = False
+    # Presenting this as `X-Bootstrap-Token` allows creating the first user.
+    # Without it set, the registration endpoint is closed entirely.
+    auth_bootstrap_token: str | None = None
+
+    # --- Artifact integrity ------------------------------------------------
+    # joblib.load() executes pickle opcodes, so loading an artifact whose bytes
+    # someone else could influence is remote code execution. Every bundle is
+    # HMAC-signed on write and verified on read. Leave unset to have a key
+    # generated and persisted on first use.
+    artifact_signing_key: str | None = None
+
+    # --- Storage -----------------------------------------------------------
+    storage_backend: str = "local"  # "local" | "s3"
+    s3_bucket: str | None = None
+    s3_prefix: str = "analyst"
+    s3_endpoint_url: str | None = None  # set for MinIO and other S3-compatibles
+    s3_region: str | None = None
+
+    # --- Job queue ---------------------------------------------------------
+    # "inline" runs training in the web process (FastAPI BackgroundTasks);
+    # "rq" hands it to a separate worker so a web restart cannot kill a job.
+    queue_backend: str = "inline"  # "inline" | "rq"
+    redis_url: str = "redis://localhost:6379/0"
+    queue_name: str = "analyst"
+    queue_job_timeout_seconds: int = 3600
+
+    # --- Data lifecycle ----------------------------------------------------
+    # Artifacts older than this are purged on startup and by the retention
+    # endpoint. 0 disables expiry (artifacts are kept until deleted by hand).
+    retention_days: int = Field(default=0, ge=0)
+
+    # --- Observability -----------------------------------------------------
+    metrics_enabled: bool = True
+    sentry_dsn: str | None = None
+    sentry_traces_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+
     # --- Persistence -------------------------------------------------------
     # Jobs and run history live here so they survive a restart and are visible
     # to every worker process.

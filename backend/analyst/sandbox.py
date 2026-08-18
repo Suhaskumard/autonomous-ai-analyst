@@ -21,6 +21,7 @@ from pathlib import Path
 
 from analyst.runner import RESULT_MARKER
 from config import settings
+from observability import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,19 @@ class ExecutionResult:
 
 
 def run_code(code: str, snapshot_path: Path | str | None, timeout_seconds: int | None = None) -> ExecutionResult:
-    """Execute `code` in a fresh sandboxed interpreter and return what it produced."""
+    """Execute `code` in a fresh sandboxed interpreter and return what it produced.
+
+    A thin wrapper over `_run_code` so the outcome is counted on every path.
+    There are six ways out of that function and five of them are failures; a
+    metric recorded at each one is a metric that will be wrong the first time a
+    sixth is added.
+    """
+    result = _run_code(code, snapshot_path, timeout_seconds)
+    metrics.observe_sandbox("ok" if result.ok else "error")
+    return result
+
+
+def _run_code(code: str, snapshot_path: Path | str | None, timeout_seconds: int | None = None) -> ExecutionResult:
     if not code or not code.strip():
         return ExecutionResult(ok=False, code=code or "", error="No code to execute.")
     if len(code) > MAX_CODE_CHARS:

@@ -67,7 +67,7 @@ def build_report(
     sections.append(_model_section(metadata))
 
     findings = {section["title"]: section.get("facts", section.get("summary")) for section in sections}
-    narrative, narrative_error = _narrate(provider, metadata, findings)
+    narrative, narrative_error, usage = _narrate(provider, metadata, findings)
 
     return {
         "run_key": run_key,
@@ -80,6 +80,10 @@ def build_report(
         },
         "narrative": narrative,
         "narrative_error": narrative_error,
+        # Reported so the caller can attribute the spend. A report is one large
+        # prompt, which makes it the most expensive thing this app does per
+        # click — exactly the call that should not be invisible on a bill.
+        "usage": usage,
         "sections": sections,
     }
 
@@ -256,11 +260,14 @@ def _model_section(metadata: dict) -> dict:
 # --- narrative --------------------------------------------------------------
 
 
-def _narrate(provider: LLMProvider | None, metadata: dict, findings: dict) -> tuple[str, str | None]:
+def _narrate(provider: LLMProvider | None, metadata: dict, findings: dict) -> tuple[str, str | None, dict[str, int]]:
+    """The written summary, why it is missing if it is, and what it cost."""
+    no_usage = {"input_tokens": 0, "output_tokens": 0}
     if provider is None:
         return (
             "",
             "No language model is configured, so this report has computed findings but no written summary.",
+            no_usage,
         )
     import json
 
@@ -270,10 +277,17 @@ def _narrate(provider: LLMProvider | None, metadata: dict, findings: dict) -> tu
     )
     try:
         reply = provider.complete(NARRATIVE_SYSTEM, [Turn(role="user", text=prompt)], [])
-        return reply.text.strip(), None
     except Exception as exc:
         logger.warning("Report narrative failed: %s", exc)
-        return "", f"The written summary could not be generated ({exc}). The computed findings below are unaffected."
+        # No tokens claimed on a failure: the call may well have been billed,
+        # but this process has no number for it, and inventing one would make
+        # the usage table wrong in the direction that matters.
+        return (
+            "",
+            f"The written summary could not be generated ({exc}). The computed findings below are unaffected.",
+            no_usage,
+        )
+    return reply.text.strip(), None, {"input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens}
 
 
 def render_markdown(report: dict) -> str:

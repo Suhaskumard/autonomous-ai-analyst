@@ -1,14 +1,16 @@
 import json
 import logging
+import time
 from uuid import uuid4
 
-import joblib
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 
 import db
+from auth import Principal, current_principal
 from config import settings
 from exceptions import DatasetTooLargeError, DatasetTooSmallError, PipelineError
+from lifecycle import expiry_for_new_run
 from logging_config import job_id_var
 from ml.diagnostics import build_diagnostics
 from ml.evaluate import per_class_report
@@ -19,16 +21,21 @@ from ml.preprocess import prepare_dataset
 from ml.quality import data_quality_report, remove_duplicate_rows
 from ml.train import HOLDOUT_SIZE, PIPELINE_VERSION, train_models
 from ml.tuning import MAX_BUDGET_SECONDS
+from observability import metrics
+from utils.artifacts import dump_bundle
 from utils.hashing import run_cache_key
 from utils.helpers import (
     METADATA_DIR,
     MODEL_DIR,
+    SPOOL_DIR,
     ensure_storage_dirs,
     now_utc_iso,
     read_csv_with_report,
     sanitize_text,
 )
+from utils.queue import get_queue
 from utils.security import artifact_path
+from utils.storage import ensure_local, publish_run
 from utils.uploads import StoredUpload, read_upload_to_temp
 
 logger = logging.getLogger(__name__)
@@ -127,12 +134,16 @@ def _result_payload(metadata: dict, status: str) -> dict:
     }
 
 
-def _register_run(metadata: dict, filename: str | None) -> None:
+def _register_run(metadata: dict, filename: str | None, owner_id: str = db.LOCAL_OWNER_ID) -> None:
     """Upsert the registry row the history UI lists, from stored metadata."""
     quality = metadata.get("quality_report") or {}
     rows = metadata.get("row_count", quality.get("rows"))
     columns = metadata.get("column_count", quality.get("columns"))
     db.upsert_run(
+        owner_id=owner_id,
+        # Every artifact gets an owner and an expiry; the expiry is None when
+        # retention is off, which is still an explicit answer.
+        expires_at=expiry_for_new_run(),
         run_key=metadata["run_key"],
         dataset_hash=metadata.get("dataset_hash", ""),
         filename=filename,
@@ -156,9 +167,11 @@ def _run_upload_pipeline(
     filename: str | None = None,
     tuning_budget_seconds: float = 0.0,
     use_smote: bool = False,
+    owner_id: str = db.LOCAL_OWNER_ID,
 ) -> None:
     # Every log line emitted below this point carries the job id.
     token = job_id_var.set(job_id)
+    started = time.perf_counter()
     try:
         ensure_storage_dirs()
         mode = mode.lower()
@@ -170,6 +183,11 @@ def _run_upload_pipeline(
 
         # Cached artifacts belong to a full configuration, not just a file:
         # the same CSV in Ensemble mode is a different run from Auto.
+        # Scoped to the owner on purpose. Content-addressing means two users
+        # uploading the same CSV would otherwise resolve to the same run key
+        # and share artifacts — a cache hit for one would hand them a dataset
+        # snapshot and model the other uploaded. Deduplication is not worth a
+        # cross-tenant data leak, so the owner is part of the address.
         run_key = run_cache_key(
             dataset_hash,
             mode,
@@ -178,12 +196,18 @@ def _run_upload_pipeline(
             PIPELINE_VERSION,
             tuning_budget_seconds=tuning_budget_seconds,
             use_smote=use_smote,
+            owner_id=owner_id,
         )
         logger.info("Pipeline started", extra={"run_key": run_key, "mode": mode, "target": target_column})
 
         metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
         data_snapshot_path = artifact_path(METADATA_DIR, run_key, "_data.csv")
         model_path = artifact_path(MODEL_DIR, run_key, "_model.pkl")
+
+        # With object storage the previous run may have been trained on another
+        # machine, so "is it cached?" is a question about the bucket, not about
+        # this container's disk. A no-op on the local backend.
+        ensure_local(run_key)
 
         if metadata_path.exists() and model_path.exists():
             db.append_step(job_id, "Cache hit: loading artifacts for this exact configuration", 100)
@@ -193,7 +217,8 @@ def _run_upload_pipeline(
             # A cache hit is still a completed run for this user. Registering it
             # here keeps the history consistent when artifacts outlive their
             # registry row — a fresh database, a restored volume, a deleted row.
-            _register_run(metadata, filename)
+            _register_run(metadata, filename, owner_id)
+            metrics.observe_training("reused")
             db.complete_job(
                 job_id,
                 {
@@ -405,7 +430,8 @@ def _run_upload_pipeline(
             "feature_columns": prepared["feature_columns"],
             "pipeline_version": PIPELINE_VERSION,
         }
-        joblib.dump(bundle, model_path)
+        # Signed as it is written, so predict.py can prove this file is ours.
+        dump_bundle(bundle, model_path)
         df.to_csv(data_snapshot_path, index=False)
 
         timestamp = now_utc_iso()
@@ -473,7 +499,15 @@ def _run_upload_pipeline(
 
         # Registry row: what the Phase 3 history UI lists. Built from the same
         # metadata a cache hit would read, so both paths register identically.
-        _register_run(metadata, filename)
+        _register_run(metadata, filename, owner_id)
+
+        # Mirror the finished artifacts to durable storage, so another web
+        # process can serve predictions for this run. Deliberately after the
+        # registry row: a run that is listed but not yet mirrored degrades to a
+        # cache miss, whereas mirroring first could publish a run nothing knows.
+        published = publish_run(run_key)
+        if published:
+            logger.info("Artifacts published", extra={"run_key": run_key, "files": published})
 
         status_log = [item["step"] for item in (db.get_job(job_id) or {}).get("status_log", [])]
         db.complete_job(
@@ -485,17 +519,21 @@ def _run_upload_pipeline(
             },
             run_key,
         )
+        metrics.observe_training("trained", time.perf_counter() - started)
         logger.info(
             "Pipeline completed",
             extra={"run_key": run_key, "verdict": health.get("verdict"), "model": selected_model_name},
         )
     except PipelineError as exc:
         # Expected, user-fixable outcomes. No stack trace, and the UI gets a
-        # kind it can word appropriately.
+        # kind it can word appropriately. Counted separately from a crash:
+        # "the user sent a two-row CSV" is not an incident.
         logger.info("Pipeline rejected the input: %s", exc, extra={"kind": exc.kind})
+        metrics.observe_training("rejected")
         db.fail_job(job_id, str(exc), exc.kind, f"Failed: {exc.kind}")
     except Exception as exc:
         logger.exception("Pipeline crashed")
+        metrics.observe_training("failed")
         db.fail_job(job_id, str(exc), "pipeline", "Failed")
     finally:
         # The temp file exists only for the life of this job.
@@ -512,6 +550,7 @@ async def upload_dataset(
     target_column: str | None = Form(None),
     tuning_budget_seconds: float = Form(0.0),
     use_smote: bool = Form(False),
+    principal: Principal = Depends(current_principal),
 ):
     # Streams to a temp file under a byte/row/type ceiling instead of reading
     # the whole upload into RAM. Raises 400/413 before any work is queued.
@@ -521,13 +560,18 @@ async def upload_dataset(
     # the web process, so an unbounded search would hold a worker indefinitely.
     tuning_budget_seconds = float(min(max(tuning_budget_seconds, 0.0), MAX_BUDGET_SECONDS))
     job_id = str(uuid4())
-    db.create_job(job_id, "Upload received")
-    logger.info(
-        "Upload accepted",
-        extra={"job": job_id, "mode": mode, "bytes": stored.size, "tuning_budget": tuning_budget_seconds},
-    )
-    background_tasks.add_task(
-        _run_upload_pipeline,
+    db.create_job(job_id, "Upload received", owner_id=principal.user_id)
+
+    queue = get_queue()
+    if queue.out_of_process:
+        # The worker is a different process — often a different container — so
+        # the upload has to be handed over on shared storage rather than in a
+        # private temp directory. The worker owns the file from here and
+        # deletes it in the pipeline's finally block.
+        ensure_storage_dirs()
+        stored = stored.relocate(SPOOL_DIR)
+
+    arguments = (
         job_id,
         stored,
         mode,
@@ -536,17 +580,38 @@ async def upload_dataset(
         file.filename,
         tuning_budget_seconds,
         use_smote,
+        principal.user_id,
     )
+    logger.info(
+        "Upload accepted",
+        extra={
+            "job": job_id,
+            "mode": mode,
+            "bytes": stored.size,
+            "tuning_budget": tuning_budget_seconds,
+            "queue": queue.name,
+        },
+    )
+
+    if queue.out_of_process:
+        # Named after the job id so a re-delivery cannot start the run twice.
+        queue.enqueue(_run_upload_pipeline, *arguments, job_id=job_id)
+    else:
+        background_tasks.add_task(_run_upload_pipeline, *arguments)
+
     return {
         "job_id": job_id,
         "state": "queued",
+        "queue": queue.name,
         "message": "Upload accepted. Poll /api/upload/status/{job_id} for live progress.",
     }
 
 
 @router.get("/upload/status/{job_id}")
-def upload_status(job_id: str):
-    job = db.get_job(job_id)
+def upload_status(job_id: str, principal: Principal = Depends(current_principal)):
+    from auth import owner_scope
+
+    job = db.get_job(job_id, owner_id=owner_scope(principal))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job

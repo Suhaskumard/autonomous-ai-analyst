@@ -1,16 +1,20 @@
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from auth import Principal, current_principal, require_owned_run
 from utils.helpers import METADATA_DIR
 from utils.security import artifact_path
+from utils.storage import ensure_local
 
 router = APIRouter()
 
 
 @router.get("/insights/{run_key}")
-def get_insights(run_key: str):
+def get_insights(run_key: str, principal: Principal = Depends(current_principal)):
     metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
+    require_owned_run(run_key, principal)
+    ensure_local(run_key)
     if not metadata_path.exists():
         raise HTTPException(status_code=404, detail="No metadata found for this run key.")
     with metadata_path.open("r", encoding="utf-8") as f:

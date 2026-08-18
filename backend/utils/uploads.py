@@ -7,6 +7,7 @@ moment a limit is crossed, so nothing beyond one chunk is ever held in memory.
 """
 
 import os
+import shutil
 import tempfile
 from hashlib import sha256
 from pathlib import Path
@@ -35,6 +36,21 @@ class StoredUpload:
     def read_bytes(self) -> bytes:
         # Bounded by MAX_UPLOAD_MB, which is what makes this safe to do at all.
         return self.path.read_bytes()
+
+    def relocate(self, directory: Path) -> "StoredUpload":
+        """Move the file somewhere another process can read it.
+
+        The system temp directory is private to the process that wrote it once
+        the worker is a separate container, so a job handed to RQ has to leave
+        its input on shared storage instead. `shutil.move` rather than
+        `Path.rename` because temp and volume are usually different devices.
+        """
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / f"{self.sha256}_{self.path.name}"
+        shutil.move(str(self.path), str(destination))
+        self.path = destination
+        return self
 
     def cleanup(self) -> None:
         try:

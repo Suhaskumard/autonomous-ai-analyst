@@ -47,8 +47,10 @@ def isolated_storage(tmp_path, monkeypatch):
 
     metadata_dir = tmp_path / "metadata"
     model_dir = tmp_path / "saved_models"
+    spool_dir = tmp_path / "spool"
     metadata_dir.mkdir()
     model_dir.mkdir()
+    spool_dir.mkdir()
 
     for module_name in _DIR_HOLDERS:
         module = importlib.import_module(module_name)
@@ -56,6 +58,8 @@ def isolated_storage(tmp_path, monkeypatch):
             monkeypatch.setattr(module, "METADATA_DIR", metadata_dir, raising=False)
         if hasattr(module, "MODEL_DIR"):
             monkeypatch.setattr(module, "MODEL_DIR", model_dir, raising=False)
+        if hasattr(module, "SPOOL_DIR"):
+            monkeypatch.setattr(module, "SPOOL_DIR", spool_dir, raising=False)
 
     import db
     from config import settings
@@ -71,11 +75,39 @@ def isolated_storage(tmp_path, monkeypatch):
     # path live at a fraction of the cost; test_model_selection.py clears the
     # cap where the breadth itself is what is under test.
     monkeypatch.setattr(settings, "max_candidate_models", 4)
+
+    # Phase 6 defaults, restated rather than inherited: a developer with
+    # AUTH_ENABLED=true in backend/.env would otherwise see every test that
+    # does not send a key fail with 401, for reasons nothing in the test says.
+    monkeypatch.setattr(settings, "auth_enabled", False)
+    monkeypatch.setattr(settings, "auth_bootstrap_token", None)
+    monkeypatch.setattr(settings, "retention_days", 0)
+    monkeypatch.setattr(settings, "queue_backend", "inline")
+    monkeypatch.setattr(settings, "storage_backend", "local")
+    # A fixed signing key, so artifacts do not depend on a file generated into
+    # whichever directory the previous test happened to leave behind.
+    monkeypatch.setattr(settings, "artifact_signing_key", "test-signing-key")
+
+    # Both are process-global caches. Without a reset the first test to touch
+    # either one pins that choice for the whole session.
+    import utils.queue
+    import utils.storage
+
+    utils.queue.reset_queue()
+    utils.storage.reset_storage()
+
     db.reset_engine()
     db.init_db()
 
-    yield {"metadata_dir": metadata_dir, "model_dir": model_dir, "db_path": tmp_path / "test.db"}
+    yield {
+        "metadata_dir": metadata_dir,
+        "model_dir": model_dir,
+        "spool_dir": spool_dir,
+        "db_path": tmp_path / "test.db",
+    }
 
+    utils.queue.reset_queue()
+    utils.storage.reset_storage()
     db.reset_engine()
 
 
@@ -90,7 +122,36 @@ def client(isolated_storage):
         yield test_client
 
 
-def upload_and_wait(client, csv_path: Path, **form):
+@pytest.fixture
+def authenticated(client, monkeypatch):
+    """Auth turned on, with two accounts that own nothing yet.
+
+    Returns a helper per user carrying its bearer header, because almost every
+    isolation assertion is "the same request, sent as someone else".
+    """
+    import auth
+    from config import settings
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
+
+    def _make(email: str, is_admin: bool = False) -> dict:
+        record, api_key = auth.create_user(email, is_admin=is_admin)
+        return {
+            "user_id": record["user_id"],
+            "email": record["email"],
+            "api_key": api_key,
+            "headers": {"Authorization": f"Bearer {api_key}"},
+        }
+
+    return {
+        "client": client,
+        "alice": _make("alice@example.com", is_admin=True),
+        "bob": _make("bob@example.com"),
+        "make_user": _make,
+    }
+
+
+def upload_and_wait(client, csv_path: Path, headers: dict | None = None, **form):
     """POST a CSV and return the finished job. BackgroundTasks run inline under
     TestClient, so the job is already terminal by the time status is polled."""
     with csv_path.open("rb") as handle:
@@ -98,7 +159,8 @@ def upload_and_wait(client, csv_path: Path, **form):
             "/api/upload",
             files={"file": (csv_path.name, handle, "text/csv")},
             data={"mode": form.pop("mode", "auto"), **{k: v for k, v in form.items() if v is not None}},
+            headers=headers,
         )
     assert response.status_code == 200, response.text
     job_id = response.json()["job_id"]
-    return client.get(f"/api/upload/status/{job_id}").json()
+    return client.get(f"/api/upload/status/{job_id}", headers=headers).json()

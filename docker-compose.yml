@@ -1,3 +1,10 @@
+# The single-machine default. `docker compose up` gives the same behaviour as
+# running uvicorn by hand: training in the web process, artifacts on a volume,
+# no authentication. Bring up the multi-user shape with the profile:
+#
+#   docker compose --profile queue up
+#
+# which adds Redis and a worker, and points the API at them.
 services:
   backend:
     build:
@@ -13,11 +20,79 @@ services:
       MAX_UPLOAD_ROWS: "1000000"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GEMINI_MODEL: "${GEMINI_MODEL:-gemini-1.5-flash-8b}"
+      # --- Phase 6 ---------------------------------------------------------
+      # Off unless asked for: turning authentication on by default would lock
+      # an existing single-operator install out of its own data.
+      AUTH_ENABLED: "${AUTH_ENABLED:-false}"
+      AUTH_BOOTSTRAP_TOKEN: "${AUTH_BOOTSTRAP_TOKEN:-}"
+      # Signing key for model artifacts. Unset means "generate one and keep it
+      # on the volume", which is fine for one machine; set it explicitly when
+      # more than one process must verify the same artifacts.
+      ARTIFACT_SIGNING_KEY: "${ARTIFACT_SIGNING_KEY:-}"
+      # QUEUE_BACKEND=rq needs the queue profile below to be running.
+      QUEUE_BACKEND: "${QUEUE_BACKEND:-inline}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+      STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
+      S3_BUCKET: "${S3_BUCKET:-}"
+      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
+      S3_REGION: "${S3_REGION:-}"
+      # 0 keeps data until it is deleted by hand. Set a number of days to have
+      # runs expire; the purge runs at startup and on the admin endpoint.
+      RETENTION_DAYS: "${RETENTION_DAYS:-0}"
+      METRICS_ENABLED: "${METRICS_ENABLED:-true}"
+      SENTRY_DSN: "${SENTRY_DSN:-}"
     volumes:
       # Trained artifacts and the job database survive a container rebuild.
       - analyst-models:/app/models
     ports:
       - "8000:8000"
+    restart: unless-stopped
+
+  # Only started with `--profile queue`. Training runs here instead of in the
+  # web process, which is what lets the API restart without killing a job.
+  worker:
+    profiles: ["queue"]
+    build:
+      context: ./backend
+    command: ["python", "worker.py"]
+    environment:
+      # Must match the backend: the worker reports progress by writing the same
+      # job rows the API's status endpoint reads, and writes the artifacts the
+      # API later serves. Different values here look like jobs that never start.
+      DATABASE_URL: "sqlite:////app/models/analyst.db"
+      LOG_LEVEL: "INFO"
+      LOG_JSON: "true"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-1.5-flash-8b}"
+      ARTIFACT_SIGNING_KEY: "${ARTIFACT_SIGNING_KEY:-}"
+      QUEUE_BACKEND: "rq"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+      STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
+      S3_BUCKET: "${S3_BUCKET:-}"
+      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
+      S3_REGION: "${S3_REGION:-}"
+      RETENTION_DAYS: "${RETENTION_DAYS:-0}"
+      SENTRY_DSN: "${SENTRY_DSN:-}"
+    volumes:
+      # The same volume, not a copy: the API hands the upload over on disk and
+      # reads back the model the worker fits.
+      - analyst-models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    profiles: ["queue"]
+    image: redis:7-alpine
+    # Jobs are durable enough for this purpose without persistence: a lost
+    # queue means a job that has to be re-uploaded, not a lost model.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   frontend:

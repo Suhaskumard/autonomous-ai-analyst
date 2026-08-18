@@ -8,11 +8,13 @@ returning user find yesterday's dataset instead of losing it on refresh.
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 import db
-from utils.helpers import METADATA_DIR, MODEL_DIR
+from auth import Principal, current_principal, owner_scope, require_owned_run
+from utils.helpers import METADATA_DIR
 from utils.security import artifact_path
+from utils.storage import ensure_local, purge_run
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ MAX_COMPARE_RUNS = 4
 
 def _load_metadata(run_key: str) -> dict:
     metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
+    ensure_local(run_key)
     if not metadata_path.exists():
         raise HTTPException(status_code=404, detail="No stored artifacts for this run key.")
     with metadata_path.open("r", encoding="utf-8") as f:
@@ -31,15 +34,21 @@ def _load_metadata(run_key: str) -> dict:
 
 
 @router.get("/runs")
-def list_runs(limit: int = Query(default=50, ge=1, le=200)):
-    runs = db.list_runs(limit=limit)
+def list_runs(
+    limit: int = Query(default=50, ge=1, le=200),
+    principal: Principal = Depends(current_principal),
+):
+    runs = db.list_runs(limit=limit, owner_id=owner_scope(principal))
     return {"count": len(runs), "runs": runs}
 
 
 # NOTE: declared before /runs/{run_key} on purpose. FastAPI matches routes in
 # declaration order, so a dynamic path listed first would swallow "compare".
 @router.get("/runs/compare")
-def compare_runs(keys: str = Query(..., description="Comma-separated run keys")):
+def compare_runs(
+    keys: str = Query(..., description="Comma-separated run keys"),
+    principal: Principal = Depends(current_principal),
+):
     """Model scores side by side across runs, for the comparison chart."""
     requested = [key.strip() for key in keys.split(",") if key.strip()]
     if not requested:
@@ -50,6 +59,7 @@ def compare_runs(keys: str = Query(..., description="Comma-separated run keys"))
     comparisons = []
     for run_key in requested:
         artifact_path(METADATA_DIR, run_key, ".json")  # validates the key format
+        require_owned_run(run_key, principal)
         try:
             metadata = _load_metadata(run_key)
         except HTTPException:
@@ -86,16 +96,16 @@ def compare_runs(keys: str = Query(..., description="Comma-separated run keys"))
 
 
 @router.get("/runs/{run_key}")
-def get_run(run_key: str):
+def get_run(run_key: str, principal: Principal = Depends(current_principal)):
     artifact_path(METADATA_DIR, run_key, ".json")  # validates the key format
-    run = db.get_run(run_key)
+    run = db.get_run(run_key, owner_id=owner_scope(principal))
     if run is None:
         raise HTTPException(status_code=404, detail="No run found for this key.")
     return run
 
 
 @router.get("/runs/{run_key}/result")
-def get_run_result(run_key: str):
+def get_run_result(run_key: str, principal: Principal = Depends(current_principal)):
     """The full dashboard payload for a past run, so it can be reopened.
 
     Same shape the upload job returns, rebuilt from stored metadata — the
@@ -103,28 +113,27 @@ def get_run_result(run_key: str):
     """
     from routes.upload import _result_payload
 
+    require_owned_run(run_key, principal)
     metadata = _load_metadata(run_key)
     return {**_result_payload(metadata, status="reopened"), "created_at": metadata.get("timestamp")}
 
 
 @router.delete("/runs/{run_key}")
-def delete_run(run_key: str):
+def delete_run(run_key: str, principal: Principal = Depends(current_principal)):
     """Remove the registry row and every artifact belonging to the run."""
-    paths = [
-        artifact_path(METADATA_DIR, run_key, ".json"),
-        artifact_path(METADATA_DIR, run_key, "_data.csv"),
-        artifact_path(MODEL_DIR, run_key, "_model.pkl"),
-    ]
-    existed = db.delete_run(run_key)
+    require_owned_run(run_key, principal)
+    # Validate the key before it reaches any path builder; purge_run works from
+    # the run key alone and has no HTTP context to reject a malformed one.
+    artifact_path(METADATA_DIR, run_key, ".json")
+    existed = db.delete_run(run_key, owner_id=owner_scope(principal))
     # Conversations are about this dataset and have no meaning without it —
     # deleting the dataset but keeping the transcript of questions asked about
     # it would leave the most sensitive part behind.
     conversations_removed = db.delete_conversations_for_run(run_key)
-    removed = 0
-    for path in paths:
-        if path.exists():
-            path.unlink()
-            removed += 1
+    # Removes the metadata, the snapshot, the model and its signature, locally
+    # and from object storage — a delete that left the bucket copy behind would
+    # be a deletion endpoint that does not delete.
+    removed = purge_run(run_key)
     if not existed and removed == 0:
         raise HTTPException(status_code=404, detail="No run found for this key.")
     logger.info(

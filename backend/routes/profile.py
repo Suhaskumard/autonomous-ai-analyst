@@ -7,8 +7,9 @@ guess. Cheap: parse, profile, discard — nothing is fitted or stored.
 
 import logging
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, Depends, File, UploadFile
 
+from auth import Principal, current_principal
 from exceptions import DatasetTooSmallError
 from ml.profile import profile_dataframe
 from utils.helpers import read_csv_with_report
@@ -20,7 +21,10 @@ router = APIRouter()
 
 
 @router.post("/profile")
-async def profile_dataset(file: UploadFile = File(...)):
+async def profile_dataset(
+    file: UploadFile = File(...),
+    principal: Principal = Depends(current_principal),
+):
     # Same streamed ceilings as /upload — this endpoint is just as exposed.
     stored = await read_upload_to_temp(file)
     try:

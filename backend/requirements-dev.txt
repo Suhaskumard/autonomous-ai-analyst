@@ -10,11 +10,18 @@ anyio==4.14.2
     #   httpx
     #   starlette
     #   watchfiles
+boto3==1.43.73
+    # via -r backend/requirements.in
+botocore==1.43.73
+    # via
+    #   boto3
+    #   s3transfer
 certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
     #   requests
+    #   sentry-sdk
 cffi==2.1.1
     # via cryptography
 cfgv==3.5.0
@@ -22,7 +29,9 @@ cfgv==3.5.0
 charset-normalizer==3.5.1
     # via requests
 click==8.4.2
-    # via uvicorn
+    # via
+    #   rq
+    #   uvicorn
 cloudpickle==3.1.2
     # via shap
 colorama==0.4.6
@@ -32,6 +41,8 @@ colorama==0.4.6
     #   tqdm
 coverage==7.15.4
     # via pytest-cov
+croniter==6.2.4
+    # via rq
 cryptography==50.0.0
     # via google-auth
 distlib==0.4.3
@@ -73,6 +84,10 @@ imbalanced-learn==0.14.2
     # via -r backend/requirements.in
 iniconfig==2.3.0
     # via pytest
+jmespath==1.1.0
+    # via
+    #   boto3
+    #   botocore
 joblib==1.5.3
     # via
     #   -r backend/requirements.in
@@ -119,6 +134,8 @@ pluggy==1.6.0
     #   pytest-cov
 pre-commit==4.6.2
     # via -r backend/requirements-dev.in
+prometheus-client==0.26.0
+    # via -r backend/requirements.in
 pyasn1==0.6.4
     # via pyasn1-modules
 pyasn1-modules==0.4.2
@@ -144,7 +161,10 @@ pytest==9.1.1
 pytest-cov==7.1.0
     # via -r backend/requirements-dev.in
 python-dateutil==2.9.0.post0
-    # via pandas
+    # via
+    #   botocore
+    #   croniter
+    #   pandas
 python-discovery==1.5.2
     # via virtualenv
 python-dotenv==1.2.3
@@ -158,12 +178,20 @@ pyyaml==6.0.3
     # via
     #   pre-commit
     #   uvicorn
+redis==8.1.0
+    # via
+    #   -r backend/requirements.in
+    #   rq
 requests==2.34.2
     # via
     #   google-auth
     #   google-genai
+rq==2.11.0
+    # via -r backend/requirements.in
 ruff==0.16.3
     # via -r backend/requirements-dev.in
+s3transfer==0.19.2
+    # via boto3
 scikit-learn==1.9.0
     # via
     #   -r backend/requirements.in
@@ -178,6 +206,8 @@ scipy==1.18.0
     #   scikit-learn
     #   shap
     #   xgboost
+sentry-sdk==2.68.0
+    # via -r backend/requirements.in
 shap==0.52.0
     # via -r backend/requirements.in
 six==1.17.0
@@ -219,7 +249,10 @@ typing-inspection==0.4.4
 tzdata==2026.3
     # via pandas
 urllib3==2.7.0
-    # via requests
+    # via
+    #   botocore
+    #   requests
+    #   sentry-sdk
 uvicorn==0.52.3
     # via -r backend/requirements.in
 virtualenv==21.7.4

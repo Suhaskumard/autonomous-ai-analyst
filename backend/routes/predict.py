@@ -2,16 +2,18 @@ import json
 import logging
 from typing import Any
 
-import joblib
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from auth import Principal, current_principal, require_owned_run
 from exceptions import ArtifactError
 from ml.ensemble import ensemble_predict
+from utils.artifacts import load_bundle
 from utils.helpers import METADATA_DIR, MODEL_DIR, read_csv_with_report
 from utils.security import artifact_path, validate_dataset_hash
+from utils.storage import ensure_local
 from utils.uploads import read_upload_to_temp
 
 logger = logging.getLogger(__name__)
@@ -42,13 +44,20 @@ def _load_bundle(run_key: str) -> tuple[dict, dict]:
     metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
     model_path = artifact_path(MODEL_DIR, run_key, "_model.pkl")
 
+    # With object storage the run may have been trained by a different web
+    # process that this one shares no disk with, so "missing" is only true
+    # after the bucket has been asked. A no-op on the local backend.
+    ensure_local(run_key)
+
     if not (metadata_path.exists() and model_path.exists()):
         raise HTTPException(status_code=404, detail="No trained artifacts found for this run key.")
 
     with metadata_path.open("r", encoding="utf-8") as f:
         metadata = json.load(f)
 
-    bundle = joblib.load(model_path)
+    # Signature first: joblib.load() executes pickle opcodes, so an artifact
+    # this application did not write must never reach it.
+    bundle = load_bundle(model_path)
     if not isinstance(bundle, dict) or "pipelines" not in bundle:
         raise ArtifactError("Stored artifact predates the current pipeline. Re-upload the dataset to retrain.")
     return metadata, bundle
@@ -150,7 +159,13 @@ def predict_rows(run_key: str, df: pd.DataFrame, parse_warnings: list[str] | Non
 
 
 @router.post("/predict/{run_key}")
-async def predict(run_key: str, file: UploadFile = File(...)):
+async def predict(
+    run_key: str,
+    file: UploadFile = File(...),
+    principal: Principal = Depends(current_principal),
+):
+    validate_dataset_hash(run_key)
+    require_owned_run(run_key, principal)
     stored = await read_upload_to_temp(file)
     try:
         df, report = read_csv_with_report(stored.read_bytes())
@@ -163,8 +178,14 @@ async def predict(run_key: str, file: UploadFile = File(...)):
 
 
 @router.post("/predict/{run_key}/row")
-def predict_single_row(run_key: str, request: SingleRowRequest):
+def predict_single_row(
+    run_key: str,
+    request: SingleRowRequest,
+    principal: Principal = Depends(current_principal),
+):
     """Predict one row supplied as JSON — no file upload required."""
+    validate_dataset_hash(run_key)
+    require_owned_run(run_key, principal)
     metadata, bundle = _load_bundle(run_key)
 
     if not request.row:

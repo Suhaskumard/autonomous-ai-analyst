@@ -11,13 +11,13 @@ key and never touches the network.
 """
 
 import pytest
+
+import db
 from analyst import report as report_module
 from analyst import sandbox
 from analyst.agent import AgentStep, run_agent, trim_to_budget
 from analyst.providers import FakeProvider, LLMReply, ToolCall, Turn, estimate_tokens, set_provider_override
 from analyst.tools import build_toolset, execute_tool
-
-import db
 from config import settings
 from tests.conftest import upload_and_wait
 

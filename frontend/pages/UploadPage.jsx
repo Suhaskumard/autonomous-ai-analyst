@@ -1,6 +1,7 @@
 import React, { useCallback, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, Cpu, Loader2, Upload, X } from "lucide-react";
 
+import AccountBar from "../components/AccountBar";
 import ChatBox from "../components/ChatBox";
 import Dashboard from "../components/Dashboard";
 import DataProfile from "../components/DataProfile";
@@ -16,6 +17,8 @@ import { chatQuery, generateReport, profileDataset } from "../services/api";
  * dashboard. The profile step exists so the target is an informed choice.
  */
 export default function UploadPage() {
+  // "local" on a single-operator install, where there is nothing to sign in to.
+  const [authStatus, setAuthStatus] = useState("local");
   const [file, setFile] = useState(null);
   const [profile, setProfile] = useState(null);
   const [profiling, setProfiling] = useState(false);
@@ -84,7 +87,22 @@ export default function UploadPage() {
         </p>
       </header>
 
-      {!profile && !result && (
+      <AccountBar onStatusChange={({ status }) => setAuthStatus(status)} />
+
+      {authStatus === "signed-out" && (
+        // Everything below needs a credential, so showing the upload form here
+        // would only produce a 401 the moment the user chose a file.
+        <div className="card fade-in">
+          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>Sign in to continue</h2>
+          <p style={{ margin: "8px 0 0", fontSize: "0.9rem", color: "var(--text-secondary)" }}>
+            This server has authentication enabled. Enter the API key you were issued above — it is shown once when the
+            account is created and cannot be recovered afterwards. Your datasets, models, and conversations are visible
+            only to your account.
+          </p>
+        </div>
+      )}
+
+      {authStatus !== "signed-out" && !profile && !result && (
         <div className="card fade-in">
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
             <div className="icon-chip">

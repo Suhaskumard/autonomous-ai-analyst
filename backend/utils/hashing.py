@@ -13,6 +13,7 @@ def run_cache_key(
     pipeline_version: str,
     tuning_budget_seconds: float = 0.0,
     use_smote: bool = False,
+    owner_id: str = "local",
 ) -> str:
     """Content-address the whole run configuration, not just the file.
 
@@ -32,5 +33,8 @@ def run_cache_key(
         pipeline_version,
         f"tune={float(tuning_budget_seconds or 0):g}",
         f"smote={bool(use_smote)}",
+        # Two accounts uploading the same file must not collide onto one run
+        # key: a cache hit would serve one user the other's stored snapshot.
+        f"owner={owner_id or 'local'}",
     ]
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()

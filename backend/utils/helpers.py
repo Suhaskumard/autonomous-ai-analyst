@@ -11,6 +11,11 @@ import pandas as pd
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODEL_DIR = BASE_DIR / "models" / "saved_models"
 METADATA_DIR = BASE_DIR / "models" / "metadata"
+# Uploads waiting for an out-of-process worker. A temp file in the system temp
+# directory is fine when the pipeline runs in the web process, but an RQ worker
+# is a different container with a different /tmp — the handover has to happen
+# somewhere both of them mount, which is the same volume as the artifacts.
+SPOOL_DIR = BASE_DIR / "models" / "spool"
 
 # Unicode general categories that are never legitimate data: control (Cc),
 # format/zero-width (Cf), surrogates (Cs), unassigned (Cn). Everything else —
@@ -21,6 +26,7 @@ _UNPRINTABLE_CATEGORIES = {"Cc", "Cf", "Cs", "Cn"}
 def ensure_storage_dirs() -> None:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     METADATA_DIR.mkdir(parents=True, exist_ok=True)
+    SPOOL_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def now_utc() -> datetime:

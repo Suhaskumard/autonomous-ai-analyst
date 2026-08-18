@@ -229,7 +229,7 @@ The interface follows a **"Depth & Clarity"** approach:
 - **Dataset Snapshot**: the backend stores a sanitized CSV snapshot per run, used for the chatbot and for reproducing results.
 - **Durable jobs**: job state and the run registry live in SQLite (`DATABASE_URL`), so a restart does not lose them and multiple workers see the same rows. A job interrupted by a restart is marked failed with an explanation rather than polling forever.
 - **Structured logs**: one JSON object per line, each carrying a request id (echoed as the `x-request-id` header) and, inside a training job, the job id.
-- **Probes**: `GET /healthz` (liveness) and `GET /readyz` (readiness — checks the database and reports whether an LLM key is configured).
+- **Probes**: `GET /healthz` (liveness), `GET /readyz` (readiness — the database is the only hard dependency; the queue, storage backend, and LLM key are reported but never fatal, because each degrades to something that still serves), and `GET /metrics` (Prometheus, when `METRICS_ENABLED`).
 - **Training cost**: cross-validation multiplies every fit by the fold count, so a run is meaningfully slower than a single-split one — that is the price of a score with a variance attached. `MAX_CANDIDATE_MODELS` caps how many candidates a run may try when a fast answer matters more than an exhaustive one, and the candidate set already adapts to dataset size.
 - **Optional model libraries**: LightGBM and imbalanced-learn are pinned in `requirements.txt`. CatBoost is used when it happens to be installed but is not pinned — the wheel is ~100 MB and LightGBM covers similar ground. A missing optional library removes its models from the registry and is recorded as absent in the model card, rather than failing the run.
 
@@ -238,6 +238,60 @@ The interface follows a **"Depth & Clarity"** approach:
 **Your rows stay on this machine.** Earlier versions uploaded the dataset snapshot to the Google Gemini Files API so that Google's sandbox could compute on it. That is gone: analysis code now runs in a local sandboxed subprocess against the snapshot on your disk.
 
 What still leaves the machine is the *conversation* — your question, the schema (column names and dtypes), and the compact text summary of each tool result (for example "mean 48.85, 240 rows, 3 distinct values"). Row-level data is not sent, and neither are the rendered charts. If even column names are sensitive, do not use the chat panel; upload, training, the dashboard, and predictions never contact an LLM at all.
+
+**Retention and deletion.** Every run records an owner and an expiry. `RETENTION_DAYS` sets how long artifacts live; `0` (the default) keeps them until deleted by hand, because silently deleting someone's models on an upgrade would be worse than keeping them. The purge runs at startup and on `POST /api/admin/retention/purge` — deliberately not on an in-process timer, which is one more thing that dies with the process; put it on a cron entry if you want it hourly.
+
+Three ways data leaves for good, all of which remove bytes rather than only rows:
+
+| What | How |
+| --- | --- |
+| One run | `DELETE /api/runs/{run_key}` — metadata, snapshot, model, signature, and every conversation about it |
+| Everything you own | `DELETE /api/account/data?confirm=true` |
+| Anything past its expiry | `POST /api/admin/retention/purge`, or a restart |
+
+`GET /api/privacy` returns this policy as JSON, so the UI and the docs cannot drift apart. Usage records (token counts and estimated cost) survive a data deletion: they are the billing record and contain no dataset content.
+
+**Deleting a conversation deletes it with its dataset.** A transcript of questions asked about a dataset is often more revealing than the dataset, so it is never left behind.
+
+### Running it for more than one person
+
+Everything above assumes one trusted operator on localhost, which is the default and stays the default. Going multi-user is opt-in, one setting at a time — nothing here turns on by itself.
+
+```bash
+# 1. Authentication. Generate a bootstrap token, then create the first account.
+AUTH_ENABLED=true
+AUTH_BOOTSTRAP_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+curl -X POST localhost:8000/api/auth/register   -H "X-Bootstrap-Token: $AUTH_BOOTSTRAP_TOKEN"   -H "Content-Type: application/json"   -d '{"email": "you@example.com"}'
+# -> {"api_key": "analyst_...", "is_admin": true}
+```
+
+The key is shown **once** and cannot be recovered — only its SHA-256 is stored. Registration closes as soon as one account exists; after that an admin creates accounts with `POST /api/admin/users`. Paste the key into the strip at the top of the UI, or send it as `Authorization: Bearer <key>`.
+
+```bash
+# 2. A real job queue, so training survives an API restart.
+docker compose --profile queue up --build
+```
+
+This adds Redis and a worker process. `QUEUE_BACKEND=rq` makes the API hand jobs over instead of running them in its own process; `docker compose restart backend` mid-training then leaves the run untouched. An unreachable Redis falls back to inline execution rather than accepting jobs nothing would ever run — a slower request beats an upload that reports "queued" forever. The worker must share the API's `DATABASE_URL` and artifact volume: it reports progress by writing the same job rows the status endpoint reads.
+
+```bash
+# 3. Object storage, so more than one machine can serve the same run.
+STORAGE_BACKEND=s3
+S3_BUCKET=your-bucket      # S3_ENDPOINT_URL for MinIO and friends
+```
+
+Artifacts are mirrored to the bucket after each run and pulled back on a miss. Credentials come from the usual boto3 chain (environment, profile, instance role) and are deliberately not settings, so they cannot end up in a log line. A misconfigured bucket degrades to local disk rather than taking training down.
+
+```bash
+# 4. Observability.
+METRICS_ENABLED=true       # GET /metrics, Prometheus exposition
+SENTRY_DSN=https://...     # errors only; send_default_pii is off
+```
+
+Metrics labels are bounded — method, normalised path, model, outcome — and never include a run key, filename, or email, so `/api/runs/<hash>` collapses to `/api/runs/:id` instead of creating one time series per dataset. `GET /api/usage` reports what the LLM has cost your account and `GET /api/admin/usage` reports it across all of them. **Both are estimates** computed from published list prices, for spotting a runaway session — not an invoice.
+
+Run `python worker.py` directly if you are not using Docker. RQ forks per job on POSIX and cannot on Windows, so use `QUEUE_BACKEND=inline` for local development there.
 
 ### About the sandbox
 
@@ -257,4 +311,8 @@ This is a restricted execution environment, not a security boundary against a de
 - **Sandboxed execution**: analysis code runs in a separate one-shot interpreter with a timeout, an import denylist, and an audit hook refusing network, subprocess, and file writes. The child is given a minimal environment, so it cannot read `GEMINI_API_KEY`.
 - **LLM endpoint limits**: per-conversation message rate and token budget, and a bounded agent loop.
 
-Still open (Phase 6, only if going live): there is no authentication and no per-user isolation, so anyone who can reach the API can read every dataset and conversation on it. Rate limiting is per conversation, not per client, so it slows a single session rather than stopping an abusive one. Run this on a trusted network only.
+- **Signed model artifacts**: `joblib.load` executes pickle opcodes, so every model bundle is written with an HMAC-SHA256 sidecar and verified *before* deserialisation. An artifact this application did not write is refused rather than loaded, which closes the path from "someone can drop a file in `models/`" to remote code execution. Path validation was never sufficient on its own: it proves a file is in the right directory, not that it is ours.
+- **Authentication and isolation** (opt-in, `AUTH_ENABLED`): a bearer API key per account, stored only as a SHA-256 hash and shown exactly once. Every run, conversation, job, and artifact carries an owner, and every query is scoped to it — including an admin's, because being an admin is authority over accounts, not over their datasets. A run belonging to someone else answers 404, not 403: a run key is a content hash, and confirming that a given hash exists would leak both the dataset and who holds it.
+- **No cross-tenant cache sharing**: content-addressed caching means two accounts uploading the same CSV would otherwise resolve to the same run key and share artifacts — a cache hit handing one user the other's dataset snapshot. The owner is part of the cache key, so deduplication stops at the account boundary. This is a deliberate trade: identical files are stored twice.
+
+Still open: rate limiting is per conversation, not per client, so it slows a single session rather than stopping an abusive one. There is no password reset, session expiry, or audit log. With `AUTH_ENABLED=false` — the default — anyone who can reach the API can read every dataset on it, which is the correct posture for one operator on localhost and the wrong one for anything else.
