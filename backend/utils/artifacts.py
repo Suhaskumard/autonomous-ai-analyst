@@ -62,6 +62,48 @@ def signing_key() -> bytes:
     return key
 
 
+def key_source() -> str:
+    """Where the signing key came from: "configured" or "generated"."""
+    return "configured" if (settings.artifact_signing_key or "").strip() else "generated"
+
+
+def signing_status() -> dict:
+    """Whether an artifact written here could be verified anywhere else.
+
+    A generated key is per-machine, and a per-machine key is invisible until
+    the day a second process has to verify something the first one signed —
+    at which point every load fails its integrity check and the message says
+    the artifact was tampered with, which is the wrong diagnosis entirely.
+
+    So this is reported rather than enforced. On one machine a generated key is
+    the right default and nothing is wrong. The moment the deployment is
+    distributed — an out-of-process worker, a shared bucket, a shared database —
+    an unset `ARTIFACT_SIGNING_KEY` is a latent outage, and `/readyz` says so
+    while still serving, because refusing traffic would not help either.
+    """
+    from utils.queue import get_queue
+    from utils.storage import get_storage
+
+    source = key_source()
+    reasons = []
+    if get_queue().out_of_process:
+        reasons.append("the training worker runs in another process")
+    if get_storage().name != "local":
+        reasons.append("artifacts are shared through object storage")
+    if not settings.database_url.startswith("sqlite"):
+        reasons.append("the database is shared with other processes")
+
+    portable = source == "configured" or not reasons
+    status = {"ok": portable, "signing_key": source, "portable": portable}
+    if not portable:
+        status["detail"] = (
+            "ARTIFACT_SIGNING_KEY is unset, so this process signs with a key it generated for "
+            "itself, but " + " and ".join(reasons) + ". Artifacts signed here will fail "
+            "verification elsewhere. Set the same ARTIFACT_SIGNING_KEY on every process."
+        )
+    return status
+
+
 def digest_file(path: Path) -> str:
     """HMAC-SHA256 of a file's bytes, streamed rather than read whole."""
     mac = hmac.new(signing_key(), digestmod=hashlib.sha256)

@@ -1,3 +1,13 @@
+# NOTE: this file only applies to a build whose context is the repo root.
+# Neither image in docker-compose.yml is: they use `context: ./backend` and
+# `context: ./frontend`, and Docker reads .dockerignore from the context root.
+# The rules that protect those images live in backend/.dockerignore and
+# frontend/.dockerignore — edit those, not this one.
+#
+# This file was the only one for six phases, which is how backend/.env, every
+# dataset snapshot, and every fitted model ended up inside the published backend
+# image: the patterns below are repo-relative and were never even read.
+
 .git
 .github
 **/__pycache__

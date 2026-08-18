@@ -1,0 +1,13 @@
+# This repository is developed on Windows (core.autocrlf=true) and deployed on
+# Linux. Anything a Linux kernel or shell parses has to keep LF endings: a
+# script checked out with CRLF fails as "bad interpreter: /usr/bin/env sh^M",
+# which reads like a missing shell rather than a line ending.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+docker-compose.yml text eol=lf
+
+# Binary; never normalise, never try to merge.
+*.pdf binary
+*.pkl binary
+*.db binary

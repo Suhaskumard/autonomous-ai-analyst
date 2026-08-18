@@ -34,7 +34,9 @@ import db
 from config import settings
 from logging_config import configure_logging
 from observability import init_sentry
+from utils.artifacts import signing_status
 from utils.helpers import ensure_storage_dirs
+from utils.migrations import schema_status
 
 configure_logging(level=settings.log_level, as_json=settings.log_json)
 logger = logging.getLogger(__name__)
@@ -57,10 +59,19 @@ def main() -> int:
         return 2
 
     ensure_storage_dirs()
-    # The API normally creates the schema, but a worker can legitimately start
+    # The API normally migrates the schema, but a worker can legitimately start
     # first — and it writes job rows, so it cannot assume the tables exist.
+    # init_db waits for the database before migrating, which matters here: this
+    # process usually starts alongside Postgres rather than after it.
     db.init_db()
     init_sentry()
+
+    # The worker is the process that *writes* the model bundles the API later
+    # verifies, so a per-machine signing key breaks predictions rather than
+    # training — a failure that surfaces far from its cause.
+    artifacts = signing_status()
+    if not artifacts["ok"]:
+        logger.error(artifacts["detail"])
 
     connection = redis.from_url(settings.redis_url)
     try:
@@ -71,9 +82,16 @@ def main() -> int:
         logger.error("Redis at %s is not reachable: %s", settings.redis_url, exc)
         return 1
 
+    # The database URL carries a password once it points at Postgres, so what
+    # is logged is which kind of database this is, not how to connect to it.
     logger.info(
         "Worker starting",
-        extra={"queue": settings.queue_name, "redis": settings.redis_url, "database": settings.database_url},
+        extra={
+            "queue": settings.queue_name,
+            "redis": settings.redis_url,
+            "database": "sqlite" if db.is_sqlite() else "server",
+            "schema_revision": schema_status(db.get_engine()).get("revision"),
+        },
     )
     worker = Worker([Queue(settings.queue_name, connection=connection)], connection=connection)
     worker.work(with_scheduler=False)

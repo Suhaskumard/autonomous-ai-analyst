@@ -4,6 +4,7 @@ Every test runs against a temporary database and temporary artifact
 directories, so a test run never touches (or is influenced by) real models.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,21 @@ if str(BACKEND_DIR) not in sys.path:
 # Modules that captured METADATA_DIR / MODEL_DIR at import time. Redirecting
 # storage means rebinding the name in each of them, not just in utils.helpers.
 _DIR_HOLDERS = ("utils.helpers", "routes.upload", "routes.predict", "routes.insights", "routes.chat", "routes.runs")
+
+
+def _drop_every_table(engine) -> None:
+    """Empty a shared test database, schema included.
+
+    `alembic_version` goes too: leaving it behind would have the next test
+    migrate a database whose tables had just been dropped, which fails in a way
+    that reads like a broken migration rather than a dirty fixture.
+    """
+    from sqlalchemy import text
+    from sqlmodel import SQLModel
+
+    SQLModel.metadata.drop_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
 
 
 @pytest.fixture
@@ -64,7 +80,26 @@ def isolated_storage(tmp_path, monkeypatch):
     import db
     from config import settings
 
-    monkeypatch.setattr(settings, "database_url", f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    # The suite runs against SQLite by default and against whatever
+    # TEST_DATABASE_URL points at when it is set — which is how Phase 7's "the
+    # full suite passes against Postgres" is checked rather than asserted. One
+    # database is reused across tests there (creating one per test costs more
+    # than every test in the file), so it is emptied first; tests run in a
+    # single process, in order, so nothing else is looking at it.
+    test_database_url = os.getenv("TEST_DATABASE_URL")
+    if test_database_url:
+        monkeypatch.setattr(settings, "database_url", test_database_url)
+        # Reset first, exactly like the SQLite path. Keeping one pooled engine
+        # across tests was tried as a way to cut connection churn and it broke
+        # isolation instead: pooled connections outlive the schema that is
+        # dropped and recreated between tests, and a test that reconnects
+        # mid-run ("as if the process had restarted") found tables missing.
+        # Churn is not the thing to economise on here — a per-test schema reset
+        # is the point of the fixture.
+        db.reset_engine()
+        _drop_every_table(db.get_engine())
+    else:
+        monkeypatch.setattr(settings, "database_url", f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
     # No test may reach a real LLM. backend/.env is loaded at import, so without
     # this the analyst tests would bill (and leak) the operator's actual key.
     # Tests that need a model install analyst.providers.set_provider_override.

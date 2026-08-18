@@ -43,6 +43,15 @@ backend/models/.artifact_signing_key
 # Secret scanner baseline is tracked; its cache is not
 .secrets.baseline.tmp
 
+# Backups written by ops/backup.sh. These are the real thing — a database dump
+# with every account and every run in it, and the artifact bytes to match.
+# Committing one would put customer data in the repository forever.
+backups/
+
+# Load-test output. Numbers worth keeping go in docs/phase7-results.md by hand;
+# the raw JSON is a scratch file naming the machine it ran on.
+ops/results/
+
 # OS
 .DS_Store
 Thumbs.db

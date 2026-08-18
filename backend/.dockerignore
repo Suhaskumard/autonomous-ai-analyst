@@ -1,0 +1,33 @@
+# Docker reads .dockerignore from the *build context root*, and this service is
+# built with `context: ./backend`. The repo-root .dockerignore is therefore never
+# consulted for this image, and its `backend/...` patterns would not match here
+# anyway — paths are relative to the context.
+#
+# Without this file the image shipped with backend/.env in it (the live Gemini
+# key), every stored dataset snapshot, every fitted model bundle, the test suite,
+# and scratch/. Found in Phase 7 by looking inside a built image instead of
+# assuming; see docs/phase7-results.md.
+
+# Secrets. First, and the reason this file exists.
+.env
+.env.*
+!.env.example
+
+# Generated artifacts: dataset snapshots, fitted models, the job database, and
+# uploads spooled for the worker. All runtime state, all mounted as a volume at
+# runtime — baking a build-time copy in both leaks data and shadows the mount.
+models/
+
+# Not needed to serve, and each one is extra attack surface in the image.
+tests/
+scratch/
+
+# Build noise.
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/

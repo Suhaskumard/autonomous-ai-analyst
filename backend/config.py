@@ -110,8 +110,30 @@ class Settings(BaseSettings):
 
     # --- Persistence -------------------------------------------------------
     # Jobs and run history live here so they survive a restart and are visible
-    # to every worker process.
+    # to every worker process. SQLite is the single-process default and stops
+    # being the right answer the moment a worker and an API process write at
+    # once: set a postgresql:// URL for that shape (see docs/production.md).
     database_url: str = f"sqlite:///{(BASE_DIR / 'models' / 'analyst.db').as_posix()}"
+    # Pool settings apply to server-backed databases only — SQLite gets a
+    # single file handle and none of this is meaningful there. The defaults
+    # suit one API process and one worker; raise pool_size with replicas, and
+    # keep (pool_size + max_overflow) * processes under Postgres' max_connections.
+    db_pool_size: int = Field(default=5, ge=1)
+    db_max_overflow: int = Field(default=10, ge=0)
+    db_pool_timeout_seconds: int = Field(default=30, gt=0)
+    # Below Postgres' idle timeout and any proxy's, so a connection is recycled
+    # by us rather than discovered dead by a request.
+    db_pool_recycle_seconds: int = Field(default=1800, gt=0)
+    # A worker or API process usually starts before the database accepts
+    # connections. Retrying beats crash-looping and beats a healthcheck that
+    # reports ready while the schema does not exist yet.
+    db_connect_retry_seconds: int = Field(default=30, ge=0)
+    # How long a single connection attempt may take before it is abandoned.
+    # libpq's default is *no timeout*: a database that accepts the TCP SYN and
+    # then goes silent — a wedged proxy, a dropped NAT entry, a host that
+    # vanished — blocks the caller forever, with no error and nothing in the
+    # logs. Found exactly that way, hanging a test run at connection ~200.
+    db_connect_timeout_seconds: int = Field(default=10, gt=0)
 
     # --- Logging -----------------------------------------------------------
     log_level: str = "INFO"

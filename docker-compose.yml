@@ -1,46 +1,69 @@
 # The single-machine default. `docker compose up` gives the same behaviour as
-# running uvicorn by hand: training in the web process, artifacts on a volume,
-# no authentication. Bring up the multi-user shape with the profile:
+# running uvicorn by hand: training in the web process, SQLite on a volume, no
+# authentication. Everything past that is a profile, and the profiles are meant
+# to be turned on one at a time — four subsystems changed at once is a stack
+# where the next failure has four candidate causes.
 #
-#   docker compose --profile queue up
+#   docker compose --profile queue up               # Redis + a worker
+#   docker compose --profile postgres up            # Postgres instead of SQLite
+#   docker compose --profile storage up             # MinIO as the artifact store
+#   docker compose --profile replica up             # a second API, empty disk
 #
-# which adds Redis and a worker, and points the API at them.
+# docs/production.md has the drills that prove each one, and .env.production.example
+# has the settings that go with them.
+
+# The API and the worker must agree about the database, the artifact store, and
+# the signing key: the worker writes the rows the API's status endpoint reads
+# and the bundles it later verifies. Sharing one anchor is how they stay in
+# agreement — two copied blocks drift, and the drift looks like jobs that never
+# start rather than like a configuration mistake.
+x-backend-environment: &backend-environment
+  DATABASE_URL: "${DATABASE_URL:-sqlite:////app/models/analyst.db}"
+  DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
+  DB_MAX_OVERFLOW: "${DB_MAX_OVERFLOW:-10}"
+  LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+  LOG_JSON: "true"
+  GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+  GEMINI_MODEL: "${GEMINI_MODEL:-gemini-1.5-flash-8b}"
+  # --- Phase 6 ---------------------------------------------------------------
+  # Off unless asked for: turning authentication on by default would lock an
+  # existing single-operator install out of its own data.
+  AUTH_ENABLED: "${AUTH_ENABLED:-false}"
+  AUTH_BOOTSTRAP_TOKEN: "${AUTH_BOOTSTRAP_TOKEN:-}"
+  # Unset means "generate one and keep it on the volume", which is correct for
+  # one process and silently wrong for several: a bundle signed with a
+  # generated key fails verification everywhere else, and the error says
+  # tampering. Set it explicitly before enabling the queue, storage, or replica
+  # profiles — /readyz reports `checks.artifacts.ok: false` until you do.
+  ARTIFACT_SIGNING_KEY: "${ARTIFACT_SIGNING_KEY:-}"
+  QUEUE_BACKEND: "${QUEUE_BACKEND:-inline}"
+  REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+  STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
+  S3_BUCKET: "${S3_BUCKET:-}"
+  S3_PREFIX: "${S3_PREFIX:-analyst}"
+  S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
+  S3_REGION: "${S3_REGION:-}"
+  # boto3's own chain, not settings: credentials must not be one /readyz bug
+  # away from being logged, so they never become a Settings field.
+  AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+  AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+  # 0 keeps data until it is deleted by hand. Set a number of days to have runs
+  # expire; the purge runs at startup and on the admin endpoint.
+  RETENTION_DAYS: "${RETENTION_DAYS:-0}"
+  METRICS_ENABLED: "${METRICS_ENABLED:-true}"
+  SENTRY_DSN: "${SENTRY_DSN:-}"
+
 services:
   backend:
     build:
       context: ./backend
     environment:
+      <<: *backend-environment
       # The frontend is served same-origin through nginx, so the only origin
       # that needs listing is the browser-facing one.
-      CORS_ALLOW_ORIGINS: "http://localhost:5173"
-      DATABASE_URL: "sqlite:////app/models/analyst.db"
-      LOG_LEVEL: "INFO"
-      LOG_JSON: "true"
-      MAX_UPLOAD_MB: "50"
-      MAX_UPLOAD_ROWS: "1000000"
-      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
-      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-1.5-flash-8b}"
-      # --- Phase 6 ---------------------------------------------------------
-      # Off unless asked for: turning authentication on by default would lock
-      # an existing single-operator install out of its own data.
-      AUTH_ENABLED: "${AUTH_ENABLED:-false}"
-      AUTH_BOOTSTRAP_TOKEN: "${AUTH_BOOTSTRAP_TOKEN:-}"
-      # Signing key for model artifacts. Unset means "generate one and keep it
-      # on the volume", which is fine for one machine; set it explicitly when
-      # more than one process must verify the same artifacts.
-      ARTIFACT_SIGNING_KEY: "${ARTIFACT_SIGNING_KEY:-}"
-      # QUEUE_BACKEND=rq needs the queue profile below to be running.
-      QUEUE_BACKEND: "${QUEUE_BACKEND:-inline}"
-      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
-      STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
-      S3_BUCKET: "${S3_BUCKET:-}"
-      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
-      S3_REGION: "${S3_REGION:-}"
-      # 0 keeps data until it is deleted by hand. Set a number of days to have
-      # runs expire; the purge runs at startup and on the admin endpoint.
-      RETENTION_DAYS: "${RETENTION_DAYS:-0}"
-      METRICS_ENABLED: "${METRICS_ENABLED:-true}"
-      SENTRY_DSN: "${SENTRY_DSN:-}"
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-http://localhost:5173}"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-50}"
+      MAX_UPLOAD_ROWS: "${MAX_UPLOAD_ROWS:-1000000}"
     volumes:
       # Trained artifacts and the job database survive a container rebuild.
       - analyst-models:/app/models
@@ -56,27 +79,24 @@ services:
       context: ./backend
     command: ["python", "worker.py"]
     environment:
-      # Must match the backend: the worker reports progress by writing the same
-      # job rows the API's status endpoint reads, and writes the artifacts the
-      # API later serves. Different values here look like jobs that never start.
-      DATABASE_URL: "sqlite:////app/models/analyst.db"
-      LOG_LEVEL: "INFO"
-      LOG_JSON: "true"
-      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
-      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-1.5-flash-8b}"
-      ARTIFACT_SIGNING_KEY: "${ARTIFACT_SIGNING_KEY:-}"
+      <<: *backend-environment
+      # Fixed rather than inherited: a worker with QUEUE_BACKEND=inline consumes
+      # nothing and sits idle while the API runs every job itself.
       QUEUE_BACKEND: "rq"
-      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
-      STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
-      S3_BUCKET: "${S3_BUCKET:-}"
-      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
-      S3_REGION: "${S3_REGION:-}"
-      RETENTION_DAYS: "${RETENTION_DAYS:-0}"
-      SENTRY_DSN: "${SENTRY_DSN:-}"
     volumes:
       # The same volume, not a copy: the API hands the upload over on disk and
       # reads back the model the worker fits.
       - analyst-models:/app/models
+    # Overrides the image's healthcheck, which curls the API's /healthz. This
+    # container runs no web server, so that probe could never pass and the
+    # worker sat permanently "unhealthy" while consuming jobs perfectly well.
+    # What matters here is whether it can still reach the queue it listens on.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,redis; redis.from_url(os.environ['REDIS_URL']).ping()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     depends_on:
       redis:
         condition: service_healthy
@@ -95,6 +115,92 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # Only started with `--profile postgres`, and only used once DATABASE_URL
+  # points at it — the service being up changes nothing on its own. SQLite stops
+  # being the right store the moment a worker and an API process write at once:
+  # concurrent writers get "database is locked", not a queue.
+  #
+  #   DATABASE_URL=postgresql+psycopg://analyst:analyst@postgres:5432/analyst
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-analyst}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-analyst}"
+      POSTGRES_DB: "${POSTGRES_DB:-analyst}"
+      # Every timestamp column is naive UTC; the server agreeing about that
+      # costs nothing and removes a class of off-by-hours confusion.
+      TZ: "UTC"
+      PGTZ: "UTC"
+    volumes:
+      - analyst-postgres:/var/lib/postgresql/data
+    ports:
+      # Exposed so pg_dump and psql can run from the host during the backup
+      # drill. Bind to 127.0.0.1 rather than every interface.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-analyst} -d ${POSTGRES_DB:-analyst}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Only started with `--profile storage`. An S3-compatible bucket on the
+  # laptop, so the object-storage path is exercised against a real S3 API rather
+  # than a stand-in — and so the replica below can serve a model it never fitted.
+  minio:
+    profiles: ["storage"]
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "${AWS_ACCESS_KEY_ID:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${AWS_SECRET_ACCESS_KEY:-minioadmin}"
+    volumes:
+      - analyst-minio:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001" # web console
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # One-shot: creates the bucket and exits. Without it the first run fails on a
+  # missing bucket, which the storage layer degrades past by writing to local
+  # disk — so the misconfiguration would look like everything working.
+  minio-init:
+    profiles: ["storage"]
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MC_HOST_local: "http://${AWS_ACCESS_KEY_ID:-minioadmin}:${AWS_SECRET_ACCESS_KEY:-minioadmin}@minio:9000"
+    entrypoint: ["/bin/sh", "-c", "mc mb --ignore-existing local/${S3_BUCKET:-analyst-artifacts} && mc ls local"]
+    restart: "no"
+
+  # Only started with `--profile replica`. A second API process with its own
+  # empty volume: it has never trained anything and cannot see the first one's
+  # disk, so a prediction served from here proves the backend is genuinely
+  # shared rather than accidentally co-located. Needs STORAGE_BACKEND=s3, a
+  # shared DATABASE_URL, and the same ARTIFACT_SIGNING_KEY.
+  backend-replica:
+    profiles: ["replica"]
+    build:
+      context: ./backend
+    environment:
+      <<: *backend-environment
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-http://localhost:5173}"
+      # A replica serves; it does not run jobs in its own process.
+      QUEUE_BACKEND: "${QUEUE_BACKEND:-inline}"
+    volumes:
+      - analyst-replica-models:/app/models
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend
@@ -110,3 +216,8 @@ services:
 
 volumes:
   analyst-models:
+  analyst-postgres:
+  analyst-minio:
+  # Deliberately separate from analyst-models, and deliberately empty: a replica
+  # that shared the volume would prove nothing about shared storage.
+  analyst-replica-models:

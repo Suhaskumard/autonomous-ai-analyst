@@ -23,7 +23,9 @@ from routes.predict import router as predict_router
 from routes.profile import router as profile_router
 from routes.runs import router as runs_router
 from routes.upload import router as upload_router
+from utils.artifacts import signing_status
 from utils.helpers import ensure_storage_dirs
+from utils.migrations import schema_status
 from utils.queue import get_queue, queue_status
 from utils.storage import get_storage
 
@@ -60,13 +62,22 @@ async def lifespan(app: FastAPI):
         if summary["runs_purged"]:
             logger.info("Retention purge at startup", extra=summary)
 
+    # Said once, loudly, at startup as well as on /readyz: the failure it warns
+    # about happens at prediction time, in another process, long after whoever
+    # could have set the variable has stopped looking.
+    artifacts = signing_status()
+    if not artifacts["ok"]:
+        logger.error(artifacts["detail"])
+
     logger.info(
         "Startup complete",
         extra={
-            "database": settings.database_url,
+            "database": "sqlite" if db.is_sqlite() else "server",
+            "schema_revision": schema_status(db.get_engine()).get("revision"),
             "auth": settings.auth_enabled,
             "queue": queue_status()["backend"],
             "storage": get_storage().name,
+            "artifact_signing_key": artifacts["signing_key"],
             "retention_days": settings.retention_days,
         },
     )
@@ -154,7 +165,7 @@ def readiness():
     checks: dict = {}
     try:
         db.list_runs(limit=1)
-        checks["database"] = {"ok": True}
+        checks["database"] = {"ok": True, "dialect": "sqlite" if db.is_sqlite() else "server"}
     except Exception as exc:
         logger.exception("Readiness check failed")
         return JSONResponse(
@@ -162,10 +173,22 @@ def readiness():
             content={"status": "unavailable", "checks": {"database": {"ok": False, "detail": str(exc)}}},
         )
 
+    # A process running against a schema older than its code is a hard failure:
+    # it will not fail at startup, it will fail on whichever request first
+    # touches the column that is missing, which is a much worse way to find out.
+    schema = schema_status(db.get_engine())
+    checks["schema"] = schema
+    if not schema["ok"]:
+        logger.error("Schema is not at head", extra=schema)
+        return JSONResponse(status_code=503, content={"status": "unavailable", "checks": checks})
+
     queue = queue_status()
     checks["queue"] = {"ok": queue["healthy"], **queue}
     storage = get_storage()
     checks["storage"] = {"ok": True, "backend": storage.name}
+    # Reported, never fatal: a per-machine signing key serves fine until a
+    # second process has to verify what this one wrote. See utils/artifacts.py.
+    checks["artifacts"] = signing_status()
     checks["llm"] = {"ok": settings.gemini_key is not None, "configured": settings.gemini_key is not None}
 
     return {

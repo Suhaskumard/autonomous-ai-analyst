@@ -1,3 +1,20 @@
-node_modules
-dist
+# Same reason as backend/.dockerignore: patterns are relative to the build
+# context, and this image is built with `context: ./frontend`, so the repo-root
+# file never applies.
+#
+# The runtime stage only copies /app/dist, so nothing here leaks into the
+# published image — but `COPY . .` into the build stage was shipping the host's
+# node_modules into the builder, which is slow and can break the install by
+# overwriting what `npm ci` just resolved for the container's platform.
+
+node_modules/
+dist/
+.vite/
+coverage/
+
 .env
+.env.*
+!.env.example
+
+npm-debug.log*
+.DS_Store

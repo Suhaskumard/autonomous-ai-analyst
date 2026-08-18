@@ -29,3 +29,11 @@ redis
 boto3
 prometheus-client
 sentry-sdk
+
+# Phase 7: the production path, proven rather than assumed.
+# Alembic owns the schema now that a worker and more than one API process write
+# to it concurrently — `create_all` plus a column-patching helper cannot express
+# a rename or a backfill. psycopg is the driver for the Postgres that replaces
+# SQLite in that same configuration; it is unused on the SQLite default.
+alembic
+psycopg[binary]

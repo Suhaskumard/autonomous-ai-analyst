@@ -98,7 +98,10 @@ backend/
     metadata/     <-- Per-run blueprints + data snapshot
     saved_models/ <-- Fitted Pipeline bundles
 
-  db.py           <-- Job + run persistence (SQLite via SQLModel)
+  migrations/     <-- Alembic: the schema, reviewable one change at a time
+    versions/     <-- 0001_baseline is phases 2-6, as create_all left them
+  db.py           <-- Job + run persistence (SQLModel; SQLite or Postgres)
+  worker.py       <-- The RQ worker: training that outlives an API restart
   config.py       <-- Typed settings (pydantic-settings)
   logging_config.py <-- JSON logs with request/job correlation
   exceptions.py   <-- Domain errors the routes map to status codes
@@ -122,8 +125,17 @@ frontend/
   pages/            <-- Unified Analytical Workflows
   tests/            <-- Vitest + Testing Library
 
-.github/workflows/ci.yml   <-- lint, format, tests, build, image build, secret scan
-docker-compose.yml         <-- one-command startup
+ops/                       <-- The production drills: restart, backup, restore, load
+  queue_restart_drill.py   <-- Restart the API mid-training; the run must finish
+  backup.sh / restore.sh   <-- Database + artifacts, together or not at all
+  verify_restore.py        <-- Proves a restored run still opens and still predicts
+  loadtest.py              <-- Upload latency and training wall time, recorded
+docs/
+  production.md            <-- Runbook: what to turn on, in what order, proven how
+  phase7-results.md        <-- Where the numbers and the drill results are written
+
+.github/workflows/ci.yml   <-- lint, format, tests (SQLite + Postgres), builds, secret scan
+docker-compose.yml         <-- one-command startup; profiles for queue/postgres/storage/replica
 ```
 
 ---
@@ -181,6 +193,17 @@ pytest                 # backend suite
 ruff check . && ruff format --check .
 cd frontend && npm test && npm run build
 ```
+Changed a model in `db.py`? The schema is Alembic's, so it needs a script:
+```bash
+cd backend
+alembic revision --autogenerate -m "what changed"   # a draft — read it
+alembic upgrade head
+```
+The suite fails if the models and `backend/migrations/versions/` have drifted apart. To run it against Postgres instead of SQLite:
+```bash
+docker compose --profile postgres up -d postgres
+TEST_DATABASE_URL=postgresql+psycopg://analyst:analyst@localhost:5432/analyst pytest
+```
 Dependencies are pinned. Edit `backend/requirements.in`, then recompile:
 ```bash
 uv pip compile backend/requirements.in -o backend/requirements.txt
@@ -227,9 +250,10 @@ The interface follows a **"Depth & Clarity"** approach:
 
 - **Clean Slate**: trained artifacts live in `backend/models/` and are gitignored; they are regenerated on demand and never committed.
 - **Dataset Snapshot**: the backend stores a sanitized CSV snapshot per run, used for the chatbot and for reproducing results.
-- **Durable jobs**: job state and the run registry live in SQLite (`DATABASE_URL`), so a restart does not lose them and multiple workers see the same rows. A job interrupted by a restart is marked failed with an explanation rather than polling forever.
+- **Durable jobs**: job state and the run registry live in SQLite (`DATABASE_URL`), so a restart does not lose them and multiple workers see the same rows. A job interrupted by a restart is marked failed with an explanation rather than polling forever. Point `DATABASE_URL` at Postgres once a worker and an API process write concurrently — SQLite does not queue concurrent writers, it fails them.
+- **Migrations**: the schema is Alembic's (`backend/migrations/`). Both the API and the worker run `upgrade head` at startup; a database written before Phase 7 is stamped at the baseline rather than recreated, so nothing is lost. Autogenerate a script for every model change and read it before committing — the suite fails if the models and the migrations drift apart.
 - **Structured logs**: one JSON object per line, each carrying a request id (echoed as the `x-request-id` header) and, inside a training job, the job id.
-- **Probes**: `GET /healthz` (liveness), `GET /readyz` (readiness — the database is the only hard dependency; the queue, storage backend, and LLM key are reported but never fatal, because each degrades to something that still serves), and `GET /metrics` (Prometheus, when `METRICS_ENABLED`).
+- **Probes**: `GET /healthz` (liveness), `GET /readyz` (readiness — the database and the schema revision are the hard dependencies; the queue, storage backend, artifact signing key, and LLM key are reported but never fatal, because each degrades to something that still serves), and `GET /metrics` (Prometheus, when `METRICS_ENABLED`). A schema behind the code is a 503: unlike the others it cannot degrade, it just fails at whichever request first needs the missing column.
 - **Training cost**: cross-validation multiplies every fit by the fold count, so a run is meaningfully slower than a single-split one — that is the price of a score with a variance attached. `MAX_CANDIDATE_MODELS` caps how many candidates a run may try when a fast answer matters more than an exhaustive one, and the candidate set already adapts to dataset size.
 - **Optional model libraries**: LightGBM and imbalanced-learn are pinned in `requirements.txt`. CatBoost is used when it happens to be installed but is not pinned — the wheel is ~100 MB and LightGBM covers similar ground. A missing optional library removes its models from the registry and is recorded as absent in the model card, rather than failing the run.
 
@@ -276,15 +300,26 @@ docker compose --profile queue up --build
 This adds Redis and a worker process. `QUEUE_BACKEND=rq` makes the API hand jobs over instead of running them in its own process; `docker compose restart backend` mid-training then leaves the run untouched. An unreachable Redis falls back to inline execution rather than accepting jobs nothing would ever run — a slower request beats an upload that reports "queued" forever. The worker must share the API's `DATABASE_URL` and artifact volume: it reports progress by writing the same job rows the status endpoint reads.
 
 ```bash
-# 3. Object storage, so more than one machine can serve the same run.
+# 3. Postgres, once a worker and an API process write at the same time.
+docker compose --profile postgres --profile queue up -d
+DATABASE_URL=postgresql+psycopg://analyst:analyst@postgres:5432/analyst
+```
+
+SQLite has no answer for two writers: the second gets "database is locked" rather than a turn. `postgres://` and `postgresql://` are both rewritten to the pinned psycopg driver, and `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` size the pool (they do nothing on SQLite, which has one file handle). The schema is migrated to head by whichever process starts first. Run the suite against it with `TEST_DATABASE_URL=… pytest`; CI does this on every push.
+
+```bash
+# 4. Object storage, so more than one machine can serve the same run.
+docker compose --profile storage up -d      # MinIO, and a one-shot bucket creator
 STORAGE_BACKEND=s3
 S3_BUCKET=your-bucket      # S3_ENDPOINT_URL for MinIO and friends
 ```
 
-Artifacts are mirrored to the bucket after each run and pulled back on a miss. Credentials come from the usual boto3 chain (environment, profile, instance role) and are deliberately not settings, so they cannot end up in a log line. A misconfigured bucket degrades to local disk rather than taking training down.
+Artifacts are mirrored to the bucket after each run and pulled back on a miss. Credentials come from the usual boto3 chain (environment, profile, instance role) and are deliberately not settings, so they cannot end up in a log line. A misconfigured bucket degrades to local disk rather than taking training down — which is why the bucket gets created for you: a missing one would otherwise look like everything working.
+
+`docker compose --profile replica up -d` adds a second API on port 8001 with **its own empty volume**. Train through the first and predict through the second: the only path the model can have taken is the bucket, and it only loads if the signature the trainer wrote verifies under this process's key. That one request tests shared storage, the shared database, and key portability at once.
 
 ```bash
-# 4. Observability.
+# 5. Observability.
 METRICS_ENABLED=true       # GET /metrics, Prometheus exposition
 SENTRY_DSN=https://...     # errors only; send_default_pii is off
 ```
@@ -292,6 +327,21 @@ SENTRY_DSN=https://...     # errors only; send_default_pii is off
 Metrics labels are bounded — method, normalised path, model, outcome — and never include a run key, filename, or email, so `/api/runs/<hash>` collapses to `/api/runs/:id` instead of creating one time series per dataset. `GET /api/usage` reports what the LLM has cost your account and `GET /api/admin/usage` reports it across all of them. **Both are estimates** computed from published list prices, for spotting a runaway session — not an invoice.
 
 Run `python worker.py` directly if you are not using Docker. RQ forks per job on POSIX and cannot on Windows, so use `QUEUE_BACKEND=inline` for local development there.
+
+**Set `ARTIFACT_SIGNING_KEY` before turning any of this on.** Left unset, each process generates its own key — correct on one machine, and silently wrong on two: a bundle signed by the worker fails verification in the API, and the error reads as tampering rather than as a missing variable. `/readyz` reports `checks.artifacts.ok: false` whenever the key is generated and something is shared, and startup logs it once.
+
+### Proving it, rather than assuming it
+
+Every capability above was written and unit-tested against a substitute. **[`docs/production.md`](docs/production.md)** is the runbook that swaps in the real thing and watches it work — in order, one subsystem at a time, because a stack where four things changed at once is a stack whose next failure has four candidate causes.
+
+```bash
+python ops/queue_restart_drill.py     # restart the API mid-training; the run must finish
+TEST_DATABASE_URL=… pytest            # the whole suite against Postgres
+ops/backup.sh && ops/restore.sh …     # then: python ops/verify_restore.py
+python ops/loadtest.py --concurrency 8 --requests 24
+```
+
+Results go in [`docs/phase7-results.md`](docs/phase7-results.md), which is deliberately unfilled: the drills need a running Docker daemon, and a checkbox ticked without watching the thing happen is worse than an empty one.
 
 ### About the sandbox
 
@@ -306,7 +356,7 @@ This is a restricted execution environment, not a security boundary against a de
 - **Path safety**: every artifact key (`run_key`) from a client is validated against `^[a-f0-9]{64}$` and resolved under a known storage root before it is used to load an artifact, so a crafted value cannot reach `joblib.load` on an arbitrary file.
 - **Bounded uploads**: uploads stream to a temp file in 1 MB chunks under a byte ceiling (`MAX_UPLOAD_MB`), a row ceiling (`MAX_UPLOAD_ROWS`), and an extension/content-type check. Nothing beyond one chunk is held in memory, and the temp file is removed when the job ends.
 - **CORS**: an explicit origin list from `CORS_ALLOW_ORIGINS`; no wildcard, and credentials are disabled until there is an auth story that needs them.
-- **Secrets**: `backend/.env` is untracked and gitignored, and `pre-commit` runs `gitleaks` on every commit.
+- **Secrets**: `backend/.env` is untracked and gitignored, and `pre-commit` runs `gitleaks` on every commit. Startup logs which *kind* of database is configured rather than the URL, which carries a password once it points at Postgres. Backups (`backups/`) are gitignored: one contains every account and every run.
 
 - **Sandboxed execution**: analysis code runs in a separate one-shot interpreter with a timeout, an import denylist, and an audit hook refusing network, subprocess, and file writes. The child is given a minimal environment, so it cannot read `GEMINI_API_KEY`.
 - **LLM endpoint limits**: per-conversation message rate and token budget, and a bounded agent loop.
@@ -315,4 +365,6 @@ This is a restricted execution environment, not a security boundary against a de
 - **Authentication and isolation** (opt-in, `AUTH_ENABLED`): a bearer API key per account, stored only as a SHA-256 hash and shown exactly once. Every run, conversation, job, and artifact carries an owner, and every query is scoped to it — including an admin's, because being an admin is authority over accounts, not over their datasets. A run belonging to someone else answers 404, not 403: a run key is a content hash, and confirming that a given hash exists would leak both the dataset and who holds it.
 - **No cross-tenant cache sharing**: content-addressed caching means two accounts uploading the same CSV would otherwise resolve to the same run key and share artifacts — a cache hit handing one user the other's dataset snapshot. The owner is part of the cache key, so deduplication stops at the account boundary. This is a deliberate trade: identical files are stored twice.
 
-Still open: rate limiting is per conversation, not per client, so it slows a single session rather than stopping an abusive one. There is no password reset, session expiry, or audit log. With `AUTH_ENABLED=false` — the default — anyone who can reach the API can read every dataset on it, which is the correct posture for one operator on localhost and the wrong one for anything else.
+- **Portable artifact signatures**: `ARTIFACT_SIGNING_KEY` can be set explicitly so every process verifies against the same key, and a bundle signed in one process is checked against another in the suite. Left unset each process generates its own — fine on one machine, and a latent outage on several, so `/readyz` and the startup log both say so rather than waiting for a prediction to fail.
+
+Still open (Phase 8, and it matters as soon as untrusted people can reach this): rate limiting is per conversation, not per client, so it slows a single session rather than stopping an abusive one. Keys cannot be rotated without downtime. There is no password reset, session expiry, or audit log, and secrets come from the environment rather than a secret manager. With `AUTH_ENABLED=false` — the default — anyone who can reach the API can read every dataset on it, which is the correct posture for one operator on localhost and the wrong one for anything else.

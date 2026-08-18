@@ -47,6 +47,54 @@ jobs:
       - name: Tests
         run: pytest --cov=backend --cov-report=term-missing
 
+  postgres:
+    name: Backend — the suite against Postgres
+    runs-on: ubuntu-latest
+    # SQLite is forgiving in ways Postgres is not, and the deployment that has a
+    # worker in it cannot use SQLite at all. Running the same suite against both
+    # is what stops "works on the default install" from being the only thing
+    # anyone knows.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: analyst
+          POSTGRES_PASSWORD: analyst
+          POSTGRES_DB: analyst
+          TZ: UTC
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U analyst -d analyst"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://analyst:analyst@localhost:5432/analyst
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install pinned dependencies
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: Migrations apply to an empty database, and roll back
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: |
+          alembic upgrade head
+          alembic current
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Tests
+        run: pytest
+
   frontend:
     name: Frontend — tests and build
     runs-on: ubuntu-latest
@@ -77,6 +125,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+
+      # Every profile, not just the default one: a service that only exists
+      # under --profile storage is a service nothing else in CI ever parses.
+      - name: Compose file is valid in every profile
+        run: |
+          docker compose config --quiet
+          docker compose --profile queue --profile postgres --profile storage --profile replica config --quiet
 
       - name: Build backend image
         uses: docker/build-push-action@v6

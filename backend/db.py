@@ -6,6 +6,8 @@ restart and every worker sees the same rows. The RunRecord table doubles as the
 dataset registry the Phase 3 history UI needs.
 """
 
+import logging
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -16,6 +18,8 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from config import settings
 from utils.helpers import now_utc
+
+logger = logging.getLogger(__name__)
 
 #: The owner every artifact falls back to when auth is disabled. Phase 6's
 #: exit criterion says every stored artifact has an owner; with one trusted
@@ -170,62 +174,114 @@ class RunRecord(SQLModel, table=True):
 _engine = None
 
 
+def normalise_database_url(url: str) -> str:
+    """Canonicalise a database URL to a driver SQLAlchemy 2 actually has.
+
+    `postgres://` is what several hosting providers hand out and what
+    SQLAlchemy has refused since 1.4, and a bare `postgresql://` selects
+    psycopg2, which is not what is pinned. Rewriting here means one place
+    understands the difference instead of every operator learning it.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url[len("postgres://") :]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://") :]
+    return url
+
+
+def is_sqlite(url: str | None = None) -> bool:
+    return (url or settings.database_url).startswith("sqlite")
+
+
+def _create_engine():
+    url = normalise_database_url(settings.database_url)
+    if is_sqlite(url):
+        # One file, one process' worth of handles: pooling parameters are not
+        # meaningful, and check_same_thread has to go because the job runs on a
+        # thread the request did not create.
+        engine = create_engine(url, connect_args={"check_same_thread": False}, pool_pre_ping=True)
+        # WAL lets the poller read while a background job writes, which is
+        # exactly the access pattern here.
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.commit()
+        return engine
+
+    connect_args = {}
+    if url.startswith("postgresql"):
+        # Every timestamp column is naive, and every value written into one is
+        # UTC (`utils.helpers.now_utc`). SQLite drops the offset on write, so
+        # that is already the contract; pinning the session timezone makes
+        # Postgres agree instead of reinterpreting the offset against whatever
+        # timezone the server happens to be configured with.
+        connect_args["options"] = "-c timezone=utc"
+        # Without this libpq waits indefinitely, so a wedged network path is
+        # indistinguishable from a slow query and `wait_for_database` never gets
+        # its exception back to retry on.
+        connect_args["connect_timeout"] = settings.db_connect_timeout_seconds
+
+    return create_engine(
+        url,
+        connect_args=connect_args,
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout_seconds,
+        pool_recycle=settings.db_pool_recycle_seconds,
+    )
+
+
 def get_engine():
     global _engine
     if _engine is None:
-        connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-        _engine = create_engine(settings.database_url, connect_args=connect_args, pool_pre_ping=True)
-        if settings.database_url.startswith("sqlite"):
-            # WAL lets the poller read while a background job writes, which is
-            # exactly the access pattern here.
-            with _engine.connect() as conn:
-                conn.execute(text("PRAGMA journal_mode=WAL"))
-                conn.commit()
+        _engine = _create_engine()
     return _engine
 
 
-def init_db() -> None:
-    engine = get_engine()
-    SQLModel.metadata.create_all(engine)
-    _add_missing_columns(engine)
+def wait_for_database(timeout_seconds: int | None = None) -> None:
+    """Block until the database answers, or raise once the budget is spent.
 
-
-def _add_missing_columns(engine) -> None:
-    """Add columns that later phases introduced to already-created tables.
-
-    `create_all` creates missing *tables* but never alters existing ones, so a
-    database written by Phase 2 would keep serving rows with no `owner_id` and
-    every ownership query would fail. This is deliberately the narrow case it
-    handles — additive, nullable-or-defaulted columns on SQLite — rather than a
-    migration framework. Anything structural needs Alembic and a real plan.
+    A worker and an API process both start faster than Postgres does. Without
+    this the first one up dies on connection refused and the container restarts
+    into the same race; with it, startup is merely slow.
     """
-    from sqlalchemy import inspect
+    budget = settings.db_connect_retry_seconds if timeout_seconds is None else timeout_seconds
+    if is_sqlite() or budget <= 0:
+        return
 
-    inspector = inspect(engine)
-    existing_tables = set(inspector.get_table_names())
+    deadline = time.monotonic() + budget
+    delay = 0.5
+    while True:
+        try:
+            with get_engine().connect() as connection:
+                connection.execute(text("SELECT 1"))
+            return
+        except Exception as exc:
+            if time.monotonic() >= deadline:
+                logger.error("Database did not accept connections within %ss", budget)
+                raise
+            logger.warning("Database not ready (%s); retrying in %.1fs", exc, delay)
+            # A fresh engine each attempt: a pool that filled with dead
+            # connections during the outage would keep handing them out.
+            reset_engine()
+            time.sleep(delay)
+            delay = min(delay * 2, 5.0)
 
-    with engine.begin() as connection:
-        for table in SQLModel.metadata.sorted_tables:
-            if table.name not in existing_tables:
-                continue
-            present = {column["name"] for column in inspector.get_columns(table.name)}
-            for column in table.columns:
-                if column.name in present:
-                    continue
-                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column.type.compile(engine.dialect)}'
-                default = _sql_default(column)
-                if default is not None:
-                    ddl += f" DEFAULT {default}"
-                connection.execute(text(ddl))
 
+def init_db() -> None:
+    """Bring the schema to head.
 
-def _sql_default(column) -> str | None:
-    """A literal default for a backfilled column, when one is knowable."""
-    if column.name == "owner_id":
-        return f"'{LOCAL_OWNER_ID}'"
-    if column.name in {"input_tokens", "output_tokens"}:
-        return "0"
-    return None
+    Phase 6 and everything before it created tables with `create_all` and
+    patched in later columns by hand. That worked while one process owned one
+    SQLite file and could not express a rename, a backfill, or a constraint —
+    and silently did nothing at all for any change that was not an added
+    column. Alembic owns the schema from Phase 7 on; see
+    backend/migrations/README.md.
+    """
+    from utils.migrations import upgrade_to_head
+
+    wait_for_database()
+    upgrade_to_head(get_engine())
 
 
 def reset_engine() -> None:
@@ -702,10 +758,13 @@ __all__ = [
     "get_job",
     "get_run",
     "init_db",
+    "is_sqlite",
     "list_runs",
+    "normalise_database_url",
     "purge_old_jobs",
     "recover_interrupted_jobs",
     "reset_engine",
     "session_scope",
     "upsert_run",
+    "wait_for_database",
 ]
