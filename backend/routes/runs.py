@@ -116,6 +116,10 @@ def delete_run(run_key: str):
         artifact_path(MODEL_DIR, run_key, "_model.pkl"),
     ]
     existed = db.delete_run(run_key)
+    # Conversations are about this dataset and have no meaning without it —
+    # deleting the dataset but keeping the transcript of questions asked about
+    # it would leave the most sensitive part behind.
+    conversations_removed = db.delete_conversations_for_run(run_key)
     removed = 0
     for path in paths:
         if path.exists():
@@ -123,5 +127,13 @@ def delete_run(run_key: str):
             removed += 1
     if not existed and removed == 0:
         raise HTTPException(status_code=404, detail="No run found for this key.")
-    logger.info("Run deleted", extra={"run_key": run_key, "artifacts_removed": removed})
-    return {"run_key": run_key, "deleted": True, "artifacts_removed": removed}
+    logger.info(
+        "Run deleted",
+        extra={"run_key": run_key, "artifacts_removed": removed, "conversations_removed": conversations_removed},
+    )
+    return {
+        "run_key": run_key,
+        "deleted": True,
+        "artifacts_removed": removed,
+        "conversations_removed": conversations_removed,
+    }

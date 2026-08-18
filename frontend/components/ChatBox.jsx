@@ -1,171 +1,186 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { Send, Bot, User, Sparkles, Loader2 } from "lucide-react";
+import { Bot, Loader2, RefreshCw, Send, Sparkles, User } from "lucide-react";
 
+import AnalystSteps from "./AnalystSteps";
+
+const SUGGESTIONS = [
+  "Which two features correlate most strongly, and does that hold within each segment?",
+  "Which column has the most missing values?",
+  "Show the distribution of the target",
+];
+
+/**
+ * The analyst conversation.
+ *
+ * History lives on the server: this posts a question and a conversation id,
+ * not a transcript. Before, the client sent back its own idea of what had been
+ * said, so anything it dropped or rewrote became what the model believed.
+ */
 export default function ChatBox({ runKey, onAsk }) {
   const [query, setQuery] = useState("");
   const [meta, setMeta] = useState(null);
+  const [conversationId, setConversationId] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
-  const chatEndRef = useRef(null);
-
-  const scrollToBottom = () => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  const [error, setError] = useState("");
+  const endRef = useRef(null);
+  const controllerRef = useRef(null);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [history]);
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [history, loading]);
 
-  const ask = async () => {
-    if (!query.trim() || loading) return;
-    
-    const userMsg = { role: "user", text: query };
-    const newHistory = [...history, userMsg];
-    setHistory(newHistory);
-    setQuery("");
-    setLoading(true);
+  // Abort an in-flight question if the panel goes away.
+  useEffect(() => () => controllerRef.current?.abort(), []);
 
-    try {
-      // Pass history to backend for multi-turn support
-      const apiHistory = history.map(h => ({
-        role: h.role === "ai" ? "assistant" : "user",
-        content: h.text
-      }));
+  const ask = useCallback(
+    async (text) => {
+      const question = (text ?? query).trim();
+      if (!question || loading) return;
 
-      const res = await onAsk({
-        run_key: runKey,
-        query,
-        history: apiHistory
-      });
+      controllerRef.current?.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
 
-      setMeta(res.response);
-      const aiMsg = { role: "ai", text: res.response.answer };
-      setHistory([...newHistory, aiMsg]);
-    } catch (err) {
-      setHistory(prev => [...prev, { role: "ai", text: "I apologize, but I encountered an error while processing your request. Please try again or re-upload the dataset." }]);
-    } finally {
-      setLoading(false);
-    }
+      setHistory((current) => [...current, { role: "user", text: question }]);
+      setQuery("");
+      setError("");
+      setLoading(true);
+
+      try {
+        const res = await onAsk(
+          { run_key: runKey, query: question, conversation_id: conversationId },
+          { signal: controller.signal }
+        );
+        setMeta(res.response);
+        setConversationId(res.conversation_id || null);
+        setHistory((current) => [
+          ...current,
+          { role: "ai", text: res.response.answer, steps: res.response.steps || [] },
+        ]);
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+        setError(err?.message || "The analyst could not be reached.");
+        setHistory((current) => current.slice(0, -1));
+        setQuery(question);
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    },
+    [conversationId, loading, onAsk, query, runKey]
+  );
+
+  const startFresh = () => {
+    controllerRef.current?.abort();
+    setConversationId(null);
+    setHistory([]);
+    setMeta(null);
+    setError("");
+    setLoading(false);
   };
 
   return (
-    <div className="card fade-in" style={{ padding: "0", overflow: "hidden" }}>
-      <div style={{ 
-        padding: "20px 32px", 
-        borderBottom: "1px solid var(--border-glass)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        background: "rgba(255, 255, 255, 0.02)"
-      }}>
+    <div className="card fade-in" style={{ padding: 0, overflow: "hidden" }}>
+      <div className="chat-head">
         <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: "12px" }}>
-          <Sparkles size={20} className="text-primary" style={{ color: "var(--primary)" }} />
+          <Sparkles size={20} style={{ color: "var(--primary)" }} />
           Advanced AI Analyst
         </h3>
-        <span style={{ fontSize: "0.8rem", color: "var(--text-dim)", textAlign: "right" }}>
-          {/* The model and data access are reported by the backend, so the UI
-              cannot advertise a model or a capability that is not in play. */}
-          {meta?.llm_model || "Gemini"}
-          {meta?.data_access === "file" && " • Answering from your uploaded rows"}
-          {meta?.data_access === "stats-only" && " • Summary statistics only"}
-          {meta?.llm_enabled === false && " • Disabled (no API key)"}
-        </span>
+        <div className="chat-head-meta">
+          {/* Model and execution location come from the backend, so the UI
+              cannot advertise a capability that is not actually in play. */}
+          <span>{meta?.llm_model || "Not yet asked"}</span>
+          {meta?.data_access === "local-execution" && <span>Runs code locally on your rows</span>}
+          {meta?.llm_enabled === false && <span>Disabled (no API key)</span>}
+          {history.length > 0 && (
+            <button type="button" className="chat-reset" onClick={startFresh}>
+              <RefreshCw size={12} />
+              New conversation
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="chat-window" style={{ border: "none", borderRadius: "0" }}>
+      <div className="chat-window" style={{ border: "none", borderRadius: 0 }}>
         <div className="chat-messages">
           {history.length === 0 && (
-            <div style={{ 
-              textAlign: "center", 
-              marginTop: "60px", 
-              color: "var(--text-dim)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: "20px"
-            }}>
-              <div style={{ 
-                width: "64px", 
-                height: "64px", 
-                borderRadius: "20px", 
-                background: "rgba(255,255,255,0.03)", 
-                display: "flex", 
-                alignItems: "center", 
-                justifyContent: "center",
-                border: "1px solid var(--border-glass)"
-              }}>
+            <div className="chat-empty">
+              <div className="chat-empty-icon">
                 <Bot size={32} />
               </div>
               <div>
-                <p style={{ fontSize: "1.1rem", color: "var(--text-secondary)", marginBottom: "8px" }}>
-                  Hello! I'm your Autonomous AI Analyst.
+                <p style={{ fontSize: "1.05rem", color: "var(--text-secondary)", marginBottom: 8 }}>
+                  Ask me about this dataset.
                 </p>
-                <p style={{ maxWidth: "400px", lineHeight: "1.6" }}>
-                  Your dataset is attached to this conversation, so I can run Python against the actual rows and show you the code behind every number.
+                <p style={{ maxWidth: 460, lineHeight: 1.6, margin: 0 }}>
+                  I run pandas against your rows on this machine and show you the code and results behind every
+                  number, so you can check them yourself.
                 </p>
+              </div>
+              <div className="chat-suggestions">
+                {SUGGESTIONS.map((suggestion) => (
+                  <button key={suggestion} type="button" onClick={() => ask(suggestion)} disabled={loading}>
+                    {suggestion}
+                  </button>
+                ))}
               </div>
             </div>
           )}
-          
-          {history.map((msg, idx) => (
-            <div key={idx} className={`message ${msg.role === "ai" ? "ai" : "user"}`}>
-              <div style={{ display: "flex", gap: "12px" }}>
-                <div style={{ 
-                  flexShrink: 0, 
-                  width: "32px", 
-                  height: "32px", 
-                  borderRadius: "8px", 
-                  background: msg.role === "ai" ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.2)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center"
-                }}>
-                  {msg.role === "ai" ? <Bot size={18} /> : <User size={18} />}
+
+          {history.map((message, index) => (
+            <div key={index} className={`message ${message.role === "ai" ? "ai" : "user"}`}>
+              <div style={{ display: "flex", gap: 12 }}>
+                <div className={message.role === "ai" ? "chat-avatar chat-avatar-ai" : "chat-avatar"}>
+                  {message.role === "ai" ? <Bot size={18} /> : <User size={18} />}
                 </div>
-                <div className="markdown-content" style={{ overflowX: "auto", width: "100%" }}>
-                  <ReactMarkdown>{msg.text}</ReactMarkdown>
+                <div style={{ width: "100%", minWidth: 0 }}>
+                  <AnalystSteps steps={message.steps} />
+                  <div className="markdown-content" style={{ overflowX: "auto" }}>
+                    <ReactMarkdown>{message.text}</ReactMarkdown>
+                  </div>
                 </div>
               </div>
             </div>
           ))}
-          
+
           {loading && (
             <div className="message ai">
-              <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-                <div style={{ 
-                  flexShrink: 0, 
-                  width: "32px", 
-                  height: "32px", 
-                  borderRadius: "8px", 
-                  background: "rgba(255,255,255,0.05)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center"
-                }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <div className="chat-avatar chat-avatar-ai">
                   <Loader2 size={18} className="animate-spin" />
                 </div>
-                <span style={{ color: "var(--text-dim)", fontSize: "0.9rem" }}>Analyst is writing code and processing results...</span>
+                <span style={{ color: "var(--text-dim)", fontSize: "0.9rem" }}>
+                  Choosing tools and running them against your rows…
+                </span>
               </div>
             </div>
           )}
-          <div ref={chatEndRef} />
+
+          {error && (
+            <div className="notice notice-error" role="alert">
+              {error}
+            </div>
+          )}
+          <div ref={endRef} />
         </div>
 
         <div className="chat-input-area">
           <input
             className="input"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && ask()}
-            placeholder="Ask me to analyze something (e.g., 'Find outliers in the target column')"
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => event.key === "Enter" && ask()}
+            placeholder="Ask a question about this dataset"
+            aria-label="Ask the analyst"
             disabled={loading}
           />
-          <button 
-            className="btn btn-primary" 
-            onClick={ask} 
+          <button
+            className="btn btn-primary"
+            onClick={() => ask()}
             disabled={loading || !query.trim()}
-            style={{ width: "48px", height: "48px", padding: "0", borderRadius: "12px" }}
+            aria-label="Send"
+            style={{ width: 48, height: 48, padding: 0, borderRadius: 12 }}
           >
             {loading ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
           </button>

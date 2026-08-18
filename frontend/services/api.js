@@ -64,6 +64,18 @@ export async function chatQuery(payload, { signal } = {}) {
   );
 }
 
+export async function generateReport(runKey, { signal } = {}) {
+  return unwrap(await fetch(`${API_BASE}/report/${runKey}`, { method: "POST", signal }));
+}
+
+export async function listConversations(runKey, { signal } = {}) {
+  return unwrap(await fetch(`${API_BASE}/chat/${runKey}/conversations`, { signal }));
+}
+
+export async function getConversation(conversationId, { signal } = {}) {
+  return unwrap(await fetch(`${API_BASE}/chat/conversation/${conversationId}`, { signal }));
+}
+
 export async function getInsights(runKey, { signal } = {}) {
   return unwrap(await fetch(`${API_BASE}/insights/${runKey}`, { signal }));
 }

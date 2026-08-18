@@ -61,6 +61,10 @@ def isolated_storage(tmp_path, monkeypatch):
     from config import settings
 
     monkeypatch.setattr(settings, "database_url", f"sqlite:///{(tmp_path / 'test.db').as_posix()}")
+    # No test may reach a real LLM. backend/.env is loaded at import, so without
+    # this the analyst tests would bill (and leak) the operator's actual key.
+    # Tests that need a model install analyst.providers.set_provider_override.
+    monkeypatch.setattr(settings, "gemini_api_key", None)
     # Cross-validation multiplies every fit by the fold count, so a full
     # ten-candidate sweep costs ~12s per pipeline run and most tests here are
     # exercising plumbing, not model breadth. Four candidates keeps every code

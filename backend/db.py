@@ -51,6 +51,50 @@ class JobRecord(SQLModel, table=True):
         }
 
 
+class ConversationRecord(SQLModel, table=True):
+    """One analyst conversation, scoped to a run.
+
+    Server-side rather than client-side on purpose: the client used to post its
+    own history back on every message, so anything it dropped, edited, or
+    invented became what the model believed had been said.
+    """
+
+    __tablename__ = "conversations"
+
+    conversation_id: str = Field(primary_key=True)
+    run_key: str = Field(index=True)
+    title: str | None = None
+    total_tokens: int = 0
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
+class MessageRecord(SQLModel, table=True):
+    """One turn. `steps` holds the tool calls behind an assistant answer."""
+
+    __tablename__ = "conversation_messages"
+
+    id: int | None = Field(default=None, primary_key=True)
+    conversation_id: str = Field(index=True)
+    role: str = "user"
+    content: str = ""
+    steps: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    input_tokens: int = 0
+    output_tokens: int = 0
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "role": self.role,
+            "content": self.content,
+            "steps": self.steps or [],
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class RunRecord(SQLModel, table=True):
     """Registry of completed runs — one row per trained configuration."""
 
@@ -239,6 +283,118 @@ def get_run(run_key: str) -> dict[str, Any] | None:
         return {**row.model_dump(), "created_at": row.created_at.isoformat() if row.created_at else None}
 
 
+def create_conversation(conversation_id: str, run_key: str, title: str | None = None) -> dict[str, Any]:
+    with session_scope() as session:
+        record = ConversationRecord(conversation_id=conversation_id, run_key=run_key, title=title)
+        session.add(record)
+        session.flush()
+        return {"conversation_id": record.conversation_id, "run_key": record.run_key, "title": record.title}
+
+
+def get_conversation(conversation_id: str) -> dict[str, Any] | None:
+    with session_scope() as session:
+        row = session.get(ConversationRecord, conversation_id)
+        if row is None:
+            return None
+        return {
+            "conversation_id": row.conversation_id,
+            "run_key": row.run_key,
+            "title": row.title,
+            "total_tokens": row.total_tokens,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+
+
+def list_conversations(run_key: str, limit: int = 20) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        rows = session.exec(
+            select(ConversationRecord)
+            .where(ConversationRecord.run_key == run_key)
+            .order_by(ConversationRecord.updated_at.desc())
+            .limit(limit)
+        ).all()
+        return [
+            {
+                "conversation_id": row.conversation_id,
+                "run_key": row.run_key,
+                "title": row.title,
+                "total_tokens": row.total_tokens,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+            for row in rows
+        ]
+
+
+def list_messages(conversation_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        rows = session.exec(
+            select(MessageRecord)
+            .where(MessageRecord.conversation_id == conversation_id)
+            .order_by(MessageRecord.id)
+            .limit(limit)
+        ).all()
+        return [row.to_dict() for row in rows]
+
+
+def append_message(
+    conversation_id: str,
+    role: str,
+    content: str,
+    steps: list[dict[str, Any]] | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        record = MessageRecord(
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            steps=steps or [],
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        session.add(record)
+
+        conversation = session.get(ConversationRecord, conversation_id)
+        if conversation is not None:
+            conversation.total_tokens += input_tokens + output_tokens
+            conversation.updated_at = now_utc()
+            # The first thing asked is the most useful label for a session.
+            if not conversation.title and role == "user" and content.strip():
+                conversation.title = content.strip()[:80]
+            session.add(conversation)
+
+        session.flush()
+        return record.to_dict()
+
+
+def count_recent_messages(conversation_id: str, since_minutes: int = 60) -> int:
+    """User messages in the recent window — what the rate limit is measured on."""
+    cutoff = now_utc() - timedelta(minutes=since_minutes)
+    with session_scope() as session:
+        rows = session.exec(
+            select(MessageRecord).where(
+                MessageRecord.conversation_id == conversation_id,
+                MessageRecord.role == "user",
+                MessageRecord.created_at >= cutoff,
+            )
+        ).all()
+        return len(rows)
+
+
+def delete_conversations_for_run(run_key: str) -> int:
+    """Deleting a dataset takes its conversations with it."""
+    with session_scope() as session:
+        rows = session.exec(select(ConversationRecord).where(ConversationRecord.run_key == run_key)).all()
+        removed = 0
+        for row in rows:
+            session.exec(delete(MessageRecord).where(MessageRecord.conversation_id == row.conversation_id))
+            session.delete(row)
+            removed += 1
+        return removed
+
+
 def delete_run(run_key: str) -> bool:
     with session_scope() as session:
         row = session.get(RunRecord, run_key)
@@ -249,9 +405,18 @@ def delete_run(run_key: str) -> bool:
 
 
 __all__ = [
+    "ConversationRecord",
     "JobRecord",
+    "MessageRecord",
     "RunRecord",
+    "append_message",
     "append_step",
+    "count_recent_messages",
+    "create_conversation",
+    "delete_conversations_for_run",
+    "get_conversation",
+    "list_conversations",
+    "list_messages",
     "complete_job",
     "create_job",
     "delete_run",

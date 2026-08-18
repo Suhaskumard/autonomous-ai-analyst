@@ -6,9 +6,10 @@ import Dashboard from "../components/Dashboard";
 import DataProfile from "../components/DataProfile";
 import ErrorBoundary from "../components/ErrorBoundary";
 import PredictPanel from "../components/PredictPanel";
+import ReportPanel from "../components/ReportPanel";
 import Workspace from "../components/Workspace";
 import useUploadJob from "../hooks/useUploadJob";
-import { chatQuery, profileDataset } from "../services/api";
+import { chatQuery, generateReport, profileDataset } from "../services/api";
 
 /**
  * The flow: pick a file → look at what is in it and choose a target → train →
@@ -234,6 +235,12 @@ export default function UploadPage() {
               </ErrorBoundary>
             )}
           </div>
+
+          {result.run_key && (
+            <ErrorBoundary title="The report could not be displayed">
+              <ReportPanel runKey={result.run_key} onGenerate={generateReport} />
+            </ErrorBoundary>
+          )}
         </div>
       )}
 

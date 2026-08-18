@@ -8,11 +8,13 @@ An enterprise-grade, full-stack autonomous data science system. It automatically
  
 ## 🌟 Key Features
   
-- **Advanced AI Chatbot (Gemini-Powered)**:
-  - **Native Code Execution**: your dataset snapshot is uploaded to the Gemini Files API and attached to the conversation, so the model's Python runs against the actual rows — not against a path it cannot reach. See *Where your data goes* below.
-  - **Contextual Memory**: Remembers past interactions for multi-turn analytical deep-dives.
-  - **Dynamic Analysis**: Ask "Find the top 3 correlations" or "Plot the distribution of the target," and the AI handles the logic.
-  - **Honest about its reach**: the chat header reports the configured model and whether the answer came from your rows or from summary statistics alone.
+- **An analyst that actually analyses**:
+  - **Code runs here, not in someone else's cloud.** Generated pandas executes in a sandboxed subprocess on this machine, against the stored snapshot. The rows never leave your disk, and every number can be recomputed by hand from the CSV.
+  - **Tools before code.** `describe_column`, `correlate`, `filter_rows`, `group_stats`, `plot` and `run_model` are deterministic implementations — the same question gives the same answer, with no generation step. `run_python` is the escape hatch for genuinely novel questions.
+  - **The work is shown, not summarised.** Each answer carries the tool calls behind it: the code that ran, the table it returned, the chart it drew. Rendered as code, tables and images — not flattened into markdown prose.
+  - **History lives on the server.** The client posts a question and a conversation id, never a transcript it could have edited. Conversations persist per dataset and are deleted with it.
+  - **Honest about its reach**: the header reports the model actually configured and that execution is local. With no API key the chat says so plainly and everything else keeps working.
+- **Autonomous report**: one button runs a full EDA sweep — column profiles, relationships, per-segment consistency, distributions, model result — and writes it up. Every number is computed by the same tools; the model only writes the prose around results it was handed, and the report still builds (findings without narrative) when no model is configured.
 - **Premium Design System**: 
   - Modern **Glassmorphic** UI with a sophisticated dark-mode aesthetic.
   - HSL-tailored color palette with vibrant accents and micro-interactions.
@@ -63,8 +65,15 @@ An enterprise-grade, full-stack autonomous data science system. It automatically
 
 ```text
 backend/
+  analyst/        <-- The agent: tools, sandbox, provider, report
+    sandbox.py    <-- Spawns the one-shot runner, times it out, parses it
+    runner.py     <-- The restricted child interpreter (guards live here)
+    tools.py      <-- Deterministic tools + the run_python escape hatch
+    providers.py  <-- LLM behind an interface (Gemini, and a fake for tests)
+    agent.py      <-- The bounded call-tools-then-answer loop
+    report.py     <-- The autonomous EDA sweep
   routes/
-    chat.py       <-- Advanced Gemini Code Execution Engine
+    chat.py       <-- Analyst endpoint, conversations, report
     upload.py     <-- Pipeline orchestration & Caching
     predict.py    <-- Inference API (batch + single row)
     profile.py    <-- Profile a CSV without training it
@@ -136,6 +145,13 @@ docker-compose.yml         <-- one-command startup
      MAX_UPLOAD_MB=50
      MAX_UPLOAD_ROWS=1000000
      MAX_CANDIDATE_MODELS=0   # 0 = try the whole registry
+
+     # Analyst sandbox and endpoint guards
+     SANDBOX_TIMEOUT_SECONDS=20
+     SANDBOX_MEMORY_MB=1024
+     AGENT_MAX_STEPS=6              # tool calls allowed per question
+     CHAT_MAX_MESSAGES_PER_HOUR=40  # per conversation
+     CHAT_TOKEN_BUDGET=120000       # per conversation
      ```
 5. **Verify Connection**:
    ```bash
@@ -175,13 +191,26 @@ uv pip compile backend/requirements-dev.in -o backend/requirements-dev.txt
 
 ## 🤖 Using the Advanced Analyst
 
-Once a dataset is uploaded, the **Advanced AI Analyst** is your primary partner for exploration:
+Once a dataset is trained, the analyst is your partner for exploration. It picks tools, runs them
+against your rows, and shows you the work:
 
-- **Mathematical Proof**: "What is the standard deviation of the target relative to feature X?"
-- **Complex Logic**: "Filter the dataset for rows where X > 50 and then calculate the mean of Y."
-- **Visual Description**: "Run a correlation analysis and tell me which features have a high coefficient."
+- **"Which two features correlate most strongly, and does that hold within each segment?"** — one
+  `correlate` call with `within`, returning the overall ranking and a per-segment breakdown you can
+  check against the CSV.
+- **"How many rows have spend above 60 in the north region?"** — a `filter_rows` call with the
+  count, the match rate, and a sample.
+- **"Plot the distribution of the target"** — a `plot` call returning a rendered PNG.
+- **Anything else** — falls through to `run_python`, whose code and output are both shown.
 
-The Analyst doesn't just "guess"—it writes **Python code** using `pandas` to provide ground-truth answers from your specific CSV snapshot.
+Every claim it makes comes from a tool result. Expand any step to see the code, the table, or the
+chart that produced the number.
+
+### Guards on the endpoint
+
+The LLM endpoint is the one that costs money, so it is bounded: `AGENT_MAX_STEPS` tool calls per
+question, `CHAT_MAX_MESSAGES_PER_HOUR` messages per conversation, and a `CHAT_TOKEN_BUDGET` after
+which a conversation must be restarted. Exceeding a limit returns 429 with an explanation. When the
+budget forces a trim, the answer says so rather than quietly losing context.
 
 ---
 
@@ -206,7 +235,15 @@ The interface follows a **"Depth & Clarity"** approach:
 
 ### Where your data goes
 
-When you use the chatbot, the dataset snapshot for that run is **uploaded to the Google Gemini Files API** and referenced by the model's code-execution sandbox. That is what makes its arithmetic real and verifiable — and it means the rows leave your machine. Google retains uploaded files for roughly 48 hours. If that is not acceptable for a given dataset, do not use the chat panel for it; upload and training are entirely local. A fully server-side executor is planned for a later phase.
+**Your rows stay on this machine.** Earlier versions uploaded the dataset snapshot to the Google Gemini Files API so that Google's sandbox could compute on it. That is gone: analysis code now runs in a local sandboxed subprocess against the snapshot on your disk.
+
+What still leaves the machine is the *conversation* — your question, the schema (column names and dtypes), and the compact text summary of each tool result (for example "mean 48.85, 240 rows, 3 distinct values"). Row-level data is not sent, and neither are the rendered charts. If even column names are sensitive, do not use the chat panel; upload, training, the dashboard, and predictions never contact an LLM at all.
+
+### About the sandbox
+
+Generated code runs in a separate one-shot interpreter with a wall-clock timeout, an import denylist, and a PEP 578 audit hook that refuses network access, subprocesses, and file writes. On POSIX it also gets `RLIMIT_AS`/`RLIMIT_CPU`/`RLIMIT_FSIZE`; **Windows has no equivalent**, so there the timeout and output caps are the only ceilings.
+
+This is a restricted execution environment, not a security boundary against a determined attacker — it is built for the realistic threat, which is generated code that loops forever or tries to phone home. It is sound for a single trusted operator. If this is ever exposed to untrusted users, run the worker in a container with no network namespace and a seccomp profile.
 
 ---
 
@@ -217,4 +254,7 @@ When you use the chatbot, the dataset snapshot for that run is **uploaded to the
 - **CORS**: an explicit origin list from `CORS_ALLOW_ORIGINS`; no wildcard, and credentials are disabled until there is an auth story that needs them.
 - **Secrets**: `backend/.env` is untracked and gitignored, and `pre-commit` runs `gitleaks` on every commit.
 
-Still open (later phases): there is no authentication or rate limiting on any route, including the paid LLM endpoint. Run this on a trusted network only.
+- **Sandboxed execution**: analysis code runs in a separate one-shot interpreter with a timeout, an import denylist, and an audit hook refusing network, subprocess, and file writes. The child is given a minimal environment, so it cannot read `GEMINI_API_KEY`.
+- **LLM endpoint limits**: per-conversation message rate and token budget, and a bounded agent loop.
+
+Still open (Phase 6, only if going live): there is no authentication and no per-user isolation, so anyone who can reach the API can read every dataset and conversation on it. Rate limiting is per conversation, not per client, so it slows a single session rather than stopping an abusive one. Run this on a trusted network only.

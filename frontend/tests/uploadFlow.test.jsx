@@ -17,6 +17,9 @@ vi.mock("../services/api", () => ({
   compareRuns: vi.fn(),
   deleteRun: vi.fn(),
   getInsights: vi.fn(),
+  generateReport: vi.fn(),
+  listConversations: vi.fn(),
+  getConversation: vi.fn(),
 }));
 
 import UploadPage from "../pages/UploadPage";

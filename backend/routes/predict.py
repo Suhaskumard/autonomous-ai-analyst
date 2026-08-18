@@ -136,10 +136,21 @@ def _align_features(df: pd.DataFrame, bundle: dict, metadata: dict) -> pd.DataFr
     return df[expected]
 
 
+def predict_rows(run_key: str, df: pd.DataFrame, parse_warnings: list[str] | None = None) -> dict:
+    """Load the run's model and predict on `df`.
+
+    The one path from a frame to a response, shared by the upload route and by
+    the analyst's `run_model` tool — so the agent cannot end up with a second,
+    subtly different notion of what this model predicts.
+    """
+    metadata, bundle = _load_bundle(run_key)
+    X = _align_features(df, bundle, metadata)
+    raw_preds, probabilities = _predict_frame(bundle, X, run_key)
+    return _build_response(run_key, metadata, bundle, X, raw_preds, probabilities, parse_warnings or [])
+
+
 @router.post("/predict/{run_key}")
 async def predict(run_key: str, file: UploadFile = File(...)):
-    metadata, bundle = _load_bundle(run_key)
-
     stored = await read_upload_to_temp(file)
     try:
         df, report = read_csv_with_report(stored.read_bytes())
@@ -148,9 +159,7 @@ async def predict(run_key: str, file: UploadFile = File(...)):
     if df.empty:
         raise HTTPException(status_code=400, detail="Prediction CSV is empty after parsing malformed rows.")
 
-    X = _align_features(df, bundle, metadata)
-    raw_preds, probabilities = _predict_frame(bundle, X, run_key)
-    return _build_response(run_key, metadata, bundle, X, raw_preds, probabilities, report.warnings)
+    return predict_rows(run_key, df, report.warnings)
 
 
 @router.post("/predict/{run_key}/row")

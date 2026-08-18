@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     # operators who would rather have a fast answer than an exhaustive one.
     max_candidate_models: int = Field(default=0, ge=0)
 
+    # --- Analyst sandbox ---------------------------------------------------
+    # Generated code runs in a separate one-shot interpreter. These are the
+    # ceilings it runs under; see analyst/runner.py for what they can and
+    # cannot enforce on each platform.
+    sandbox_timeout_seconds: int = Field(default=20, gt=0, le=300)
+    sandbox_memory_mb: int = Field(default=1024, ge=128)
+    # How many tool calls one question may take before the agent must answer.
+    agent_max_steps: int = Field(default=6, ge=1, le=20)
+    # Per-conversation ceilings, so one session cannot bill indefinitely.
+    chat_max_messages_per_hour: int = Field(default=40, ge=1)
+    chat_token_budget: int = Field(default=120_000, ge=1000)
+
     # --- Persistence -------------------------------------------------------
     # Jobs and run history live here so they survive a restart and are visible
     # to every worker process.

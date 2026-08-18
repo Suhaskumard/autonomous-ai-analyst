@@ -1,26 +1,31 @@
-"""The analyst chatbot.
+"""The analyst endpoint.
 
-Previously the prompt told Gemini to `pd.read_csv()` a local Windows path.
-Code execution runs in Google's remote sandbox with no access to this disk, so
-the model answered from summary statistics or invented numbers. The dataset
-snapshot is now uploaded to the Gemini Files API and attached to the
-conversation, so the sandbox genuinely has the rows it computes on — and when
-that upload fails, the model is told plainly that it has statistics only,
-rather than being pointed at a path it cannot reach.
+What changed in Phase 5, and why:
+
+* **The data no longer leaves the machine.** The snapshot used to be uploaded
+  to the Gemini Files API so Google's sandbox could compute on it. Execution is
+  now local (`analyst.sandbox`), so the rows stay on this disk and the numbers
+  can be checked against the CSV by hand.
+* **Tools before code.** Common questions take a deterministic path; only
+  genuinely novel ones fall through to generated Python.
+* **History is the server's.** The client posts a question and a conversation
+  id, not a transcript it could have edited, dropped, or invented.
+* **The endpoint is guarded.** A per-conversation message rate and a token
+  budget, and a degraded mode that answers honestly when no key is configured.
 """
 
 import json
 import logging
-import time
+from uuid import uuid4
 
-from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException
-from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field
+from analyst import report as report_module
+from analyst.agent import run_agent, trim_to_budget
+from analyst.providers import Turn, get_provider
+from analyst.tools import build_toolset
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
-load_dotenv()
-
+import db
 from config import settings
 from utils.helpers import METADATA_DIR
 from utils.security import artifact_path, validate_dataset_hash
@@ -29,19 +34,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Gemini keeps uploaded files for 48h; re-uploading the same snapshot on every
-# message would be slow and wasteful, so remember the handle for a day.
-_FILE_CACHE_TTL_SECONDS = 24 * 60 * 60
-_uploaded_files: dict[str, tuple[object, float]] = {}
-
-# Above this, inlining the CSV in the request is not viable and only the Files
-# API path can work.
-MAX_INLINE_CSV_BYTES = 4 * 1024 * 1024
-
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str
+MAX_QUERY_CHARS = 4000
 
 
 class ChatRequest(BaseModel):
@@ -49,7 +42,7 @@ class ChatRequest(BaseModel):
     # Accepted for backwards compatibility with the pre-Phase-1 field name.
     dataset_hash: str | None = None
     query: str
-    history: list[ChatMessage] = Field(default_factory=list)
+    conversation_id: str | None = None
 
     def resolved_key(self) -> str:
         key = self.run_key or self.dataset_hash
@@ -58,216 +51,220 @@ class ChatRequest(BaseModel):
         return validate_dataset_hash(key)
 
 
-def _get_gemini_client():
-    api_key = settings.gemini_key
-    if not api_key:
-        return None
-    return genai.Client(api_key=api_key)
+def _load_metadata(run_key: str) -> dict:
+    metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
+    if not metadata_path.exists():
+        raise HTTPException(status_code=404, detail="Run key not found. Upload a dataset first.")
+    with metadata_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def _upload_snapshot(client, run_key: str, snapshot_path):
-    """Upload the CSV snapshot to the Files API, cached per run key."""
-    cached = _uploaded_files.get(run_key)
-    if cached and cached[1] > time.time():
-        return cached[0]
+def _load_snapshot(run_key: str):
+    """The CSV the analyst computes on, and the frame the tools bind to."""
+    import pandas as pd
 
-    config = {"mime_type": "text/csv", "display_name": f"{run_key[:12]}_snapshot.csv"}
-    try:
-        uploaded = client.files.upload(file=str(snapshot_path), config=config)
-    except TypeError:
-        # Older SDK signature.
-        uploaded = client.files.upload(path=str(snapshot_path), config=config)
-
-    # A freshly uploaded file is briefly PROCESSING and cannot be referenced yet.
-    deadline = time.time() + 30
-    while getattr(getattr(uploaded, "state", None), "name", "ACTIVE") == "PROCESSING" and time.time() < deadline:
-        time.sleep(0.5)
-        uploaded = client.files.get(name=uploaded.name)
-
-    state = getattr(getattr(uploaded, "state", None), "name", "ACTIVE")
-    if state == "FAILED":
-        raise RuntimeError("Gemini reported the uploaded snapshot as FAILED.")
-
-    _uploaded_files[run_key] = (uploaded, time.time() + _FILE_CACHE_TTL_SECONDS)
-    return uploaded
+    snapshot_path = artifact_path(METADATA_DIR, run_key, "_data.csv")
+    if not snapshot_path.exists():
+        return None, None
+    return snapshot_path, pd.read_csv(snapshot_path)
 
 
-def _build_system_prompt(metadata: dict, data_access: str, filename: str | None) -> str:
-    summary_stats = metadata.get("summary_stats", {})
-    features = metadata.get("features", [])
+def _system_prompt(metadata: dict, df) -> str:
     health = metadata.get("health", {})
-
-    if data_access == "file":
-        access_block = (
-            "### DATA ACCESS ###\n"
-            f"The full dataset is ATTACHED to this conversation as a CSV file ('{filename}').\n"
-            "Load it in your Python environment to compute real answers. Do NOT invent a local\n"
-            "file path, and do NOT answer numerically from the summary statistics when the\n"
-            "attached data can be computed on directly.\n"
-        )
-    else:
-        access_block = (
-            "### DATA ACCESS ###\n"
-            "You do NOT have the raw rows in this conversation — only the summary statistics\n"
-            "below. If a question needs the underlying rows, say so explicitly instead of\n"
-            "estimating, and never claim to have executed code against the dataset.\n"
-        )
-
     health_block = ""
     if health:
+        reasons = "\n".join(f"- {reason}" for reason in health.get("reasons", []))
         health_block = (
             "### MODEL HEALTH ###\n"
             f"Verdict: {health.get('verdict')} — {health.get('headline')}\n"
-            f"{chr(10).join('- ' + r for r in health.get('reasons', []))}\n"
-            "Do not describe this model as reliable if the verdict says otherwise.\n\n"
+            f"{reasons}\n"
+            "Never describe this model as reliable if the verdict says otherwise.\n\n"
         )
 
+    columns = ", ".join(f"{c} ({df[c].dtype})" for c in df.columns) if df is not None else "unknown"
+
     return (
-        "You are an Advanced Autonomous AI Data Analyst with Python code execution.\n\n"
-        f"{access_block}\n"
-        "### DATASET CONTEXT ###\n"
-        f"Input Features: {', '.join(map(str, features))}\n"
-        f"Target Column: {metadata.get('target')}\n"
-        f"Problem Type: {metadata.get('problem_type')}\n"
-        f"Selected Model: {metadata.get('selected_model')}\n\n"
+        "You are an autonomous data analyst working on one specific dataset.\n\n"
+        "### HOW YOU ANSWER ###\n"
+        "You have tools that run on the real rows, on this machine. Use them for every factual\n"
+        "claim. Never state a number you did not obtain from a tool result — no estimating, no\n"
+        "recalling, no inferring from the schema. If a tool fails, say what failed.\n\n"
+        "Prefer the specific tool over run_python: describe_column, correlate (with 'within' to\n"
+        "check a relationship inside each segment), filter_rows, group_stats, plot, run_model.\n"
+        "Fall back to run_python only when no specific tool fits.\n\n"
+        "When you have the results, answer in Markdown: state the finding, give the numbers you\n"
+        "obtained, and note any caveat the data implies. Be concise.\n\n"
+        "### DATASET ###\n"
+        f"Rows: {0 if df is None else len(df):,}\n"
+        f"Columns: {columns}\n"
+        f"Target: {metadata.get('target')}\n"
+        f"Problem type: {metadata.get('problem_type')}\n"
+        f"Selected model: {metadata.get('selected_model')}\n\n"
         f"{health_block}"
-        "### SUMMARY STATISTICS ###\n"
-        f"{json.dumps(summary_stats, indent=2)[:20000]}\n\n"
-        "### INSTRUCTIONS ###\n"
-        "1. Use code execution for anything requiring a precise number.\n"
-        "2. Show the code you ran and the result it produced, so the user can verify it.\n"
-        "3. State your assumptions; if you cannot compute something, say why.\n"
-        "4. Never present an estimate as a computed result.\n"
-        "5. Use Markdown formatting.\n"
     )
 
 
-def _extract_answer(response) -> str:
-    """Walk the response parts.
+def _turns_from_history(messages: list[dict]) -> list[Turn]:
+    """Stored messages as provider turns. Tool steps are replayed as context."""
+    turns: list[Turn] = []
+    for message in messages:
+        if message["role"] == "user":
+            turns.append(Turn(role="user", text=message["content"]))
+        elif message["role"] == "assistant":
+            summary = message["content"]
+            steps = message.get("steps") or []
+            if steps:
+                rendered = "; ".join(f"{s.get('tool')}: {s.get('summary', '')[:200]}" for s in steps)
+                summary = f"{summary}\n\n(Tools used previously — {rendered})"
+            turns.append(Turn(role="assistant", text=summary))
+    return turns
 
-    With code execution enabled a reply can be entirely executable-code and
-    result parts with no plain text at all, in which case `response.text` is
-    None and `.strip()` used to raise straight into the user's face.
-    """
-    try:
-        direct = response.text
-        if direct and direct.strip():
-            return direct.strip()
-    except Exception:  # noqa: BLE001 - .text raises on some part combinations
-        logger.info("response.text was unavailable; walking response parts instead.")
 
-    chunks: list[str] = []
-    for candidate in getattr(response, "candidates", None) or []:
-        content = getattr(candidate, "content", None)
-        for part in getattr(content, "parts", None) or []:
-            text = getattr(part, "text", None)
-            if text:
-                chunks.append(text.strip())
-                continue
-            code = getattr(part, "executable_code", None)
-            if code is not None and getattr(code, "code", None):
-                chunks.append(f"```python\n{code.code.strip()}\n```")
-                continue
-            outcome = getattr(part, "code_execution_result", None)
-            if outcome is not None and getattr(outcome, "output", None):
-                chunks.append(f"**Result**\n```\n{outcome.output.strip()}\n```")
-
-    if chunks:
-        return "\n\n".join(chunks)
-
-    finish = None
-    for candidate in getattr(response, "candidates", None) or []:
-        finish = getattr(candidate, "finish_reason", None) or finish
-    if finish:
-        return f"The model returned no readable content (finish reason: {finish})."
-    return "The model returned an empty response. Try rephrasing the question."
+def _degraded(run_key: str, query: str, conversation_id: str | None, reason: str) -> dict:
+    return {
+        "run_key": run_key,
+        "conversation_id": conversation_id,
+        "query": query,
+        "response": {
+            "answer": reason,
+            "steps": [],
+            "llm_enabled": False,
+            "data_access": "none",
+        },
+    }
 
 
 @router.post("/chat")
 def chat(req: ChatRequest):
     run_key = req.resolved_key()
-    metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
-    if not metadata_path.exists():
-        raise HTTPException(status_code=404, detail="Run key not found. Upload a dataset first.")
+    metadata = _load_metadata(run_key)
 
-    with metadata_path.open("r", encoding="utf-8") as f:
-        metadata = json.load(f)
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="Ask a question.")
+    if len(query) > MAX_QUERY_CHARS:
+        raise HTTPException(status_code=413, detail=f"Question exceeds {MAX_QUERY_CHARS} characters.")
 
-    client = _get_gemini_client()
-    if not client:
-        return {
-            "run_key": run_key,
-            "query": req.query,
-            "response": {
-                "answer": "Chatbot is unavailable because GEMINI_API_KEY is not set.",
-                "llm_enabled": False,
-                "data_access": "none",
-            },
-        }
-
-    model_id = settings.gemini_model
-    snapshot_path = artifact_path(METADATA_DIR, run_key, "_data.csv")
-
-    # Attach the real rows. Files API first; a small snapshot can also ride
-    # along inline if the upload fails.
-    attachment = None
-    data_access = "stats-only"
-    attachment_name = None
-    if snapshot_path.exists():
-        try:
-            uploaded = _upload_snapshot(client, run_key, snapshot_path)
-            attachment = uploaded
-            attachment_name = getattr(uploaded, "display_name", None) or getattr(uploaded, "name", "dataset.csv")
-            data_access = "file"
-        except Exception as exc:
-            logger.warning("Gemini Files API upload failed for %s: %s", run_key, exc, exc_info=True)
-            _uploaded_files.pop(run_key, None)
-            size = snapshot_path.stat().st_size
-            if size <= MAX_INLINE_CSV_BYTES:
-                try:
-                    attachment = types.Part.from_bytes(data=snapshot_path.read_bytes(), mime_type="text/csv")
-                    attachment_name = "dataset.csv"
-                    data_access = "file"
-                except Exception as inline_exc:
-                    logger.warning("Inline CSV attachment also failed: %s", inline_exc)
+    # --- conversation ------------------------------------------------------
+    conversation_id = req.conversation_id
+    if conversation_id:
+        conversation = db.get_conversation(conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Unknown conversation.")
+        if conversation["run_key"] != run_key:
+            raise HTTPException(status_code=400, detail="That conversation belongs to a different run.")
     else:
-        logger.warning("No data snapshot on disk for run %s; answering from statistics only.", run_key)
+        conversation_id = uuid4().hex
+        db.create_conversation(conversation_id, run_key)
+        conversation = db.get_conversation(conversation_id)
 
-    system_prompt = _build_system_prompt(metadata, data_access, attachment_name)
-
-    history = [
-        types.Content(
-            role="user" if msg.role == "user" else "model",
-            parts=[types.Part(text=msg.content)],
+    # --- guards ------------------------------------------------------------
+    recent = db.count_recent_messages(conversation_id, since_minutes=60)
+    if recent >= settings.chat_max_messages_per_hour:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"This conversation has used its hourly limit of {settings.chat_max_messages_per_hour} "
+                "messages. Start a new conversation or wait."
+            ),
         )
-        for msg in req.history
-    ]
-
-    try:
-        config = types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            tools=[types.Tool(code_execution=types.ToolCodeExecution())],
+    if conversation["total_tokens"] >= settings.chat_token_budget:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"This conversation has reached its {settings.chat_token_budget:,}-token budget. "
+                "Start a new conversation to continue."
+            ),
         )
-        chat_session = client.chats.create(model=model_id, history=history, config=config)
-        message = [attachment, req.query] if attachment is not None else req.query
-        response = chat_session.send_message(message)
-        answer = _extract_answer(response)
-    except Exception as exc:
-        logger.exception("Gemini request failed for run %s", run_key)
-        answer = f"Error generating response: {exc}"
-        data_access = data_access if attachment is not None else "stats-only"
+
+    provider = get_provider()
+    if provider is None:
+        db.append_message(conversation_id, "user", query)
+        answer = (
+            "No language model is configured, so I cannot answer questions. "
+            "Set GEMINI_API_KEY in backend/.env and restart. The dashboard, charts, and "
+            "predictions all work without it."
+        )
+        db.append_message(conversation_id, "assistant", answer)
+        return _degraded(run_key, query, conversation_id, answer)
+
+    snapshot_path, df = _load_snapshot(run_key)
+    if df is None:
+        db.append_message(conversation_id, "user", query)
+        answer = (
+            "The data snapshot for this run is missing from disk, so I have nothing to compute on. "
+            "Re-upload the dataset to restore it."
+        )
+        db.append_message(conversation_id, "assistant", answer)
+        return _degraded(run_key, query, conversation_id, answer)
+
+    # --- run ---------------------------------------------------------------
+    db.append_message(conversation_id, "user", query)
+
+    history = db.list_messages(conversation_id)
+    turns = _turns_from_history(history)
+    turns, trimmed = trim_to_budget(turns, settings.chat_token_budget // 2)
+
+    toolset = build_toolset(df, metadata, snapshot_path, run_key)
+    result = run_agent(provider, _system_prompt(metadata, df), turns, toolset)
+
+    answer = result.answer
+    if trimmed:
+        answer += "\n\n_Note: earlier turns were dropped from context to stay within the token budget._"
+
+    db.append_message(
+        conversation_id,
+        "assistant",
+        answer,
+        steps=[step.as_dict() for step in result.steps],
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+    )
 
     return {
         "run_key": run_key,
+        "conversation_id": conversation_id,
         "dataset_hash": metadata.get("dataset_hash"),
-        "query": req.query,
+        "query": query,
         "response": {
             "answer": answer,
+            "steps": [step.as_dict() for step in result.steps],
             "llm_enabled": True,
-            "llm_provider": "gemini",
-            "llm_model": model_id,
-            # The UI shows this, so the user always knows whether the answer
-            # was computed on real rows or inferred from statistics.
-            "data_access": data_access,
+            "llm_provider": provider.name,
+            "llm_model": provider.model,
+            # Execution is local now, so this is a statement about this machine.
+            "data_access": "local-execution",
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "stopped_at_step_limit": result.stopped_at_step_limit,
+            "history_trimmed": trimmed,
         },
     }
+
+
+@router.get("/chat/{run_key}/conversations")
+def conversations(run_key: str, limit: int = Query(default=20, ge=1, le=100)):
+    validate_dataset_hash(run_key)
+    return {"run_key": run_key, "conversations": db.list_conversations(run_key, limit=limit)}
+
+
+@router.get("/chat/conversation/{conversation_id}")
+def conversation_messages(conversation_id: str):
+    conversation = db.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Unknown conversation.")
+    return {**conversation, "messages": db.list_messages(conversation_id)}
+
+
+@router.post("/report/{run_key}")
+def generate_report(run_key: str):
+    """One button: a full EDA sweep whose every number is computed, not written."""
+    validate_dataset_hash(run_key)
+    metadata = _load_metadata(run_key)
+    snapshot_path, df = _load_snapshot(run_key)
+    if df is None:
+        raise HTTPException(status_code=404, detail="No data snapshot for this run. Re-upload the dataset.")
+
+    report = report_module.build_report(df, metadata, snapshot_path, run_key, provider=get_provider())
+    report["markdown"] = report_module.render_markdown(report)
+    return report
