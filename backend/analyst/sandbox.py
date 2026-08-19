@@ -7,6 +7,15 @@ snapshot on this disk, and the numbers it returns can be checked by hand.
 Everything about the child is deliberately one-shot: a fresh interpreter per
 call, no state carried between requests, and a hard kill on the deadline. A
 runaway loop costs one process, not the server.
+
+There are two ways to start that child and this module owns the choice between
+them. By default it is a subprocess of this one, guarded by the conventions in
+`runner.py`. With `SANDBOX_BACKEND=container` it is the same runner inside a
+container with no network namespace and a read-only root — see
+`analyst/container.py` for what that buys and what it costs. Everything after
+the spawn is identical, because the runner's contract is one JSON request on
+stdin and one JSON response on stdout, and neither end of that cares which of
+the two started it.
 """
 
 import json
@@ -19,6 +28,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from analyst import container
 from analyst.runner import RESULT_MARKER
 from config import settings
 from observability import metrics
@@ -121,6 +131,59 @@ def run_code(code: str, snapshot_path: Path | str | None, timeout_seconds: int |
     return result
 
 
+@dataclass
+class _SpawnPlan:
+    """How to start the child, and what to tell it once it is running."""
+
+    argv: list[str]
+    #: Where the snapshot will be *from the child's point of view*, which is not
+    #: where it is from ours once a bind mount has moved it.
+    snapshot_path: str | None
+    #: What this process waits, which is the analysis timeout plus whatever the
+    #: backend needs to get to the first line of it.
+    wall_clock: int
+    #: The environment of the command being spawned — the interpreter under one
+    #: backend and the container CLI under the other, which need different
+    #: things. Not the environment the analysis code sees; under the container
+    #: backend that is built separately and from nothing.
+    env: dict[str, str]
+    #: The container's name under the container backend, so the timeout path
+    #: has something to kill. None under the subprocess backend, where killing
+    #: the child is the same act as killing what we waited on.
+    container_name: str | None = None
+
+
+def _spawn_plan(snapshot_path: Path | str | None, timeout: int) -> _SpawnPlan:
+    """Choose how to start the child."""
+    if not container.enabled():
+        return _SpawnPlan(
+            # -I is isolated mode: no cwd on sys.path, no user site-packages,
+            # no PYTHONPATH. The runner is invoked by path rather than as
+            # `-m analyst.runner` precisely because of that last one, and it
+            # imports nothing from the app so it needs neither.
+            argv=[sys.executable, "-I", str(RUNNER_PATH)],
+            snapshot_path=str(snapshot_path) if snapshot_path else None,
+            wall_clock=timeout,
+            env=_child_env(),
+        )
+
+    name = container.container_name()
+    return _SpawnPlan(
+        argv=container.build_argv(snapshot_path, name),
+        snapshot_path=container.CONTAINER_SNAPSHOT_PATH if snapshot_path else None,
+        # Pulling and starting an image is not analysis time. Charging it to
+        # the analysis would silently shorten every question by a second or so
+        # and make the timeout mean something different per backend.
+        wall_clock=timeout + settings.sandbox_startup_grace_seconds,
+        # The full environment, because this argv is the container CLI and not
+        # the analysis: it needs DOCKER_HOST, HOME for its config, and whatever
+        # else the operator pointed it at. What the *analysis* may see is set
+        # with --env inside build_argv, and starts empty.
+        env=dict(os.environ),
+        container_name=name,
+    )
+
+
 def _run_code(code: str, snapshot_path: Path | str | None, timeout_seconds: int | None = None) -> ExecutionResult:
     if not code or not code.strip():
         return ExecutionResult(ok=False, code=code or "", error="No code to execute.")
@@ -132,32 +195,43 @@ def _run_code(code: str, snapshot_path: Path | str | None, timeout_seconds: int 
         )
 
     timeout = int(timeout_seconds or settings.sandbox_timeout_seconds)
+    try:
+        plan = _spawn_plan(snapshot_path, timeout)
+    except container.SandboxUnavailable as exc:
+        # Deliberately not a fallback to the subprocess backend. See the module
+        # docstring in analyst/container.py: an operator who asked for a
+        # boundary and quietly did not get one is the worse outcome.
+        logger.error("Container sandbox unavailable: %s", exc)
+        return ExecutionResult(ok=False, code=code, error=f"The analysis sandbox is not available: {exc}")
+
     request = {
         "code": code,
-        "snapshot_path": str(snapshot_path) if snapshot_path else None,
+        "snapshot_path": plan.snapshot_path,
         "memory_mb": settings.sandbox_memory_mb,
         # CPU seconds slightly under the wall clock, so a busy loop trips the
-        # cheaper limit first where rlimits exist.
+        # cheaper limit first where rlimits exist. Measured against the
+        # analysis's own timeout, never the container start-up grace — the
+        # grace is for the runtime, not extra CPU for the code.
         "cpu_seconds": max(1, timeout - 1),
     }
 
     started = time.perf_counter()
     try:
         completed = subprocess.run(
-            # -I is isolated mode: no cwd on sys.path, no user site-packages,
-            # no PYTHONPATH. The runner is invoked by path rather than as
-            # `-m analyst.runner` precisely because of that last one, and it
-            # imports nothing from the app so it needs neither.
-            [sys.executable, "-I", str(RUNNER_PATH)],
+            plan.argv,
             input=json.dumps(request),
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=plan.wall_clock,
             cwd=str(BACKEND_DIR),
-            env=_child_env(),
+            env=plan.env,
         )
     except subprocess.TimeoutExpired:
         duration = int((time.perf_counter() - started) * 1000)
+        if plan.container_name is not None:
+            # The timeout killed the client, not the container. Without this the
+            # analysis that ran too long keeps running, unattended, forever.
+            container.kill(plan.container_name)
         logger.info("Sandbox execution timed out after %ss", timeout)
         return ExecutionResult(
             ok=False,

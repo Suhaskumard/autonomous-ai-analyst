@@ -254,12 +254,15 @@ than one that is written down. `queue.ok: false` means Redis is unreachable and
 jobs are running inline. `artifacts.ok: false` means this process signs with a
 key nothing else has.
 
-## What is still not done
+## Next
 
-Phase 8 in `Upgrade_Plan.pdf`, and it matters if untrusted people will reach
-this: rate limiting is still per conversation rather than per account, keys
-cannot be rotated without downtime, there is no audit log, and secrets come from
-the environment rather than a secret manager. The analyst sandbox is a
-restricted execution environment, not a boundary — with untrusted users it needs
-a container with no network namespace, a seccomp profile, and a read-only
-filesystem.
+Phase 8 is written and lives in [`docs/security.md`](security.md): per-account
+rate limits and spend ceilings, key rotation without downtime, an append-only
+audit log, secrets read from files rather than the environment, and the analyst
+sandbox as a real container boundary. All of it defaults to off, and all of it
+is worth turning on only once someone you did not vouch for can reach this.
+
+Do it after the drills on this page, not before. Every ceiling in Phase 8 is
+enforced against tables — `llm_usage`, `runs`, `jobs` — that a single-process
+SQLite install and a multi-replica Postgres one disagree about, and there is no
+point tuning a limit against the substitute.

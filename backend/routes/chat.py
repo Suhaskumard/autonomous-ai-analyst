@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 import db
+import limits
 from analyst import report as report_module
 from analyst.agent import run_agent, trim_to_budget
 from analyst.providers import Turn, get_provider
@@ -166,6 +167,11 @@ def chat(req: ChatRequest, principal: Principal = Depends(current_principal)):
         conversation = db.get_conversation(conversation_id)
 
     # --- guards ------------------------------------------------------------
+    # Per account first. The per-conversation limits below stop one session
+    # running away; only this one stops a client that opens a new conversation
+    # for every message, which the per-conversation guard never could.
+    limits.check_llm_quota(principal)
+
     recent = db.count_recent_messages(conversation_id, since_minutes=60)
     if recent >= settings.chat_max_messages_per_hour:
         raise HTTPException(
@@ -289,6 +295,9 @@ def generate_report(run_key: str, principal: Principal = Depends(current_princip
     """One button: a full EDA sweep whose every number is computed, not written."""
     validate_dataset_hash(run_key)
     require_owned_run(run_key, principal)
+    # A report is several model calls in one request, so it is the cheapest
+    # endpoint to abuse and the one most worth checking the account ceiling on.
+    limits.check_llm_quota(principal)
     metadata = _load_metadata(run_key)
     snapshot_path, df = _load_snapshot(run_key)
     if df is None:

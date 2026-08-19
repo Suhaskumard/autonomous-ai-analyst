@@ -7,6 +7,7 @@ import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 
 import db
+import limits
 from auth import Principal, current_principal
 from config import settings
 from exceptions import DatasetTooLargeError, DatasetTooSmallError, PipelineError
@@ -552,6 +553,13 @@ async def upload_dataset(
     use_smote: bool = Form(False),
     principal: Principal = Depends(current_principal),
 ):
+    # Before a single byte is read: an account already at its ceiling should be
+    # refused at the door, not after streaming 50 MB it is not allowed to keep.
+    limits.check_storage_quota(principal)
+    # Same reasoning for the workers. Checked here rather than at dequeue time
+    # because a job refused after it is queued has already taken the disk and
+    # the queue slot it was supposed to be denied.
+    limits.check_job_concurrency(principal)
     # Streams to a temp file under a byte/row/type ceiling instead of reading
     # the whole upload into RAM. Raises 400/413 before any work is queued.
     stored = await read_upload_to_temp(file)

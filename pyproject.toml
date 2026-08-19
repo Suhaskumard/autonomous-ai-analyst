@@ -52,11 +52,13 @@ ignore = [
 # these are first-party even though there is no top-level package directory.
 known-first-party = [
     "analyst",
+    "audit",
     "auth",
     "config",
     "db",
     "exceptions",
     "lifecycle",
+    "limits",
     "logging_config",
     "main",
     "ml",

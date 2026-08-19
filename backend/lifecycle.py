@@ -13,6 +13,7 @@ deleting someone's models on an upgrade would be worse than keeping them.
 import logging
 from datetime import timedelta
 
+import audit
 import db
 from config import settings
 from utils.helpers import now_utc
@@ -28,15 +29,30 @@ def expiry_for_new_run():
     return now_utc() + timedelta(days=settings.retention_days)
 
 
-def purge_expired() -> dict:
+#: The actor a purge is attributed to when nobody asked for it — the one at
+#: startup. A destructive action still has to name who did it, and "the policy,
+#: on boot" is the honest answer rather than blaming whichever admin restarted
+#: the process.
+SYSTEM_ACTOR = "system:retention"
+
+
+def purge_expired(actor=None) -> dict:
     """Delete every run past its expiry, with its artifacts and conversations.
 
     Run at startup and exposed as an admin endpoint. Deliberately not a
     background timer: a scheduler inside the web process is one more thing that
     dies with it, and an operator with a cron entry is easier to reason about.
+
+    `actor` is the principal who asked, or None for the startup pass. The audit
+    entry is written here rather than at the call sites because there are two of
+    them and only one used to record anything — which left the purge that runs
+    unattended, on every boot, as the single destructive action in the
+    application with no record that it happened.
     """
     expired = db.expired_runs()
     if not expired:
+        # No entry: nothing was destroyed. A row per restart saying "deleted
+        # nothing" is how an audit log becomes something nobody reads.
         return {"runs_purged": 0, "artifacts_removed": 0, "conversations_removed": 0}
 
     artifacts = conversations = 0
@@ -53,6 +69,12 @@ def purge_expired() -> dict:
         "conversations_removed": conversations,
     }
     logger.info("Retention purge complete", extra=summary)
+    audit.record(
+        audit.RETENTION_PURGED,
+        actor if actor is not None else SYSTEM_ACTOR,
+        target_type="retention",
+        **summary,
+    )
     return summary
 
 

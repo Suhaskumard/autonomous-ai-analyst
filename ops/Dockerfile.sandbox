@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1
+#
+# The analyst sandbox as its own image — Phase 8.
+#
+#   docker build -f ops/Dockerfile.sandbox -t analyst-sandbox:latest ./backend
+#
+# Note the context: ./backend, the same as the API image, because the runner
+# lives there and must not fork into a second copy that drifts from the one the
+# subprocess backend uses. The two backends run the identical file.
+#
+# What is in here is the shortest list that can analyse a dataframe, and that is
+# a security property rather than an aesthetic one. The API image carries
+# FastAPI, SQLAlchemy, a Postgres driver, boto3, the Redis client and xgboost —
+# every one of them reachable by generated code under the subprocess backend, and
+# none of them present here. A `import sqlalchemy` inside this container fails
+# because there is nothing to import, which is a better guarantee than the
+# runner's denylist refusing it.
+#
+# Explicitly absent, and each one on purpose:
+#   * The application. No config.py, no db.py, no credentials, no models/.
+#   * A shell for the entrypoint to go through — the runner is exec'd directly.
+#   * Any writable path except the tmpfs the caller mounts at /tmp.
+
+FROM python:3.13-slim
+
+# libgomp is OpenMP, which scikit-learn's threaded estimators link against.
+# No curl and no healthcheck: this container lives for one execution, and a
+# process that can make an HTTP request is exactly what --network none exists
+# to prevent.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MPLBACKEND=Agg
+
+# Pinned to the same versions as backend/requirements.txt. They have to match:
+# an answer computed here and an answer computed by the API's own pandas must
+# be the same answer, or "the numbers can be checked by hand" stops being true.
+#
+# matplotlib is here and is *not* in backend/requirements.txt, which is
+# deliberate rather than an oversight. runner.py treats it as optional and skips
+# figures when it is missing; including it means switching to this backend never
+# takes a capability away from an install whose host Python happens to have it.
+RUN pip install --no-cache-dir \
+    numpy==2.5.2 \
+    pandas==3.0.5 \
+    scipy==1.18.0 \
+    scikit-learn==1.9.0 \
+    joblib==1.5.3 \
+    threadpoolctl==3.6.0 \
+    matplotlib==3.10.9
+
+WORKDIR /app
+
+# Only the runner. It imports nothing from the application by design, which is
+# what makes this one-file copy correct rather than a shortcut — see the module
+# docstring in analyst/runner.py.
+COPY analyst/runner.py /app/runner.py
+
+# The mount point for the single dataset an execution is allowed to see. Created
+# at build time because the root filesystem is read-only at run time and the
+# daemon cannot make the directory then.
+RUN mkdir -p /data \
+    && useradd --no-create-home --uid 10001 sandbox \
+    && chown -R root:root /app /data \
+    && chmod -R a-w /app /data
+USER 10001
+
+# Overridden by analyst/container.py, which passes -I explicitly. Repeated here
+# so that a `docker run analyst-sandbox` by hand behaves the same way.
+ENTRYPOINT ["python", "-I", "/app/runner.py"]

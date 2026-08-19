@@ -132,6 +132,10 @@ jobs:
         run: |
           docker compose config --quiet
           docker compose --profile queue --profile postgres --profile storage --profile replica config --quiet
+          # The hardening override too. It is not the default stack, which is
+          # exactly why nothing parsed it and it spent a while referencing a
+          # seccomp profile that did not exist.
+          docker compose -f docker-compose.yml -f docker-compose.hardened.yml                          --profile queue config --quiet
 
       - name: Build backend image
         uses: docker/build-push-action@v6
@@ -152,6 +156,32 @@ jobs:
           tags: analyst-frontend:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The analyst sandbox image (SANDBOX_BACKEND=container). Built from the
+      # same ./backend context as the API, because it ships the same
+      # analyst/runner.py and a second copy would drift from it.
+      - name: Build sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./ops/Dockerfile.sandbox
+          push: false
+          load: true
+          tags: analyst-sandbox:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Sandbox image computes, and cannot reach the network
+        run: |
+          # The two assertions that make it a boundary rather than a container.
+          # Not the full ops/verify_sandbox.py, which needs the application
+          # importable; this is the part that belongs on every commit.
+          echo '{"code": "int(1 + 1)", "snapshot_path": null}'             | docker run --rm -i --network none --read-only                 --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777                 --cap-drop ALL --security-opt no-new-privileges                 analyst-sandbox:ci             | tail -1 | grep -q '"ok": true'             && echo "sandbox computes"
+
+          if docker run --rm --network none --read-only                --tmpfs /tmp:rw,size=16m --cap-drop ALL                --entrypoint python analyst-sandbox:ci                -c "import socket; s=socket.socket(); s.settimeout(5); s.connect(('1.1.1.1', 53)); print('CONNECTED')"              | grep -q CONNECTED; then
+            echo "the sandbox reached the network; --network none is not in effect"; exit 1
+          fi
+          echo "sandbox has no route off the machine"
 
       - name: Backend container answers its health probe
         run: |

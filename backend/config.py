@@ -60,6 +60,40 @@ class Settings(BaseSettings):
     # cannot enforce on each platform.
     sandbox_timeout_seconds: int = Field(default=20, gt=0, le=300)
     sandbox_memory_mb: int = Field(default=1024, ge=128)
+
+    # --- Sandbox isolation (Phase 8) ---------------------------------------
+    # "subprocess" is the restricted interpreter described in analyst/runner.py:
+    # a denylist and an audit hook, which stop generated code that misbehaves
+    # and would not stop generated code that attacks. "container" runs the same
+    # runner inside `docker run --network none --read-only`, which is a kernel
+    # boundary rather than an interpreter convention, and is what this should be
+    # set to before anyone untrusted can reach the analyst.
+    #
+    # Default stays "subprocess": it needs no daemon and no image, which is the
+    # right trade for the single-operator install, and switching is one variable.
+    sandbox_backend: str = "subprocess"  # "subprocess" | "container"
+    # The runtime and the image built from ops/Dockerfile.sandbox. Podman is a
+    # drop-in here; it takes the same flags and needs no privileged daemon.
+    sandbox_runtime: str = "docker"
+    sandbox_image: str = "analyst-sandbox:latest"
+    # A seccomp profile narrows the syscall table further than --cap-drop can.
+    # Empty means the runtime's default profile, which is already restrictive;
+    # ops/seccomp-analyst.json is the tighter one this repo ships.
+    sandbox_seccomp_profile: str | None = None
+    # A fork bomb is the cheapest denial of service in a language with os.fork,
+    # and neither rlimits on Windows nor the audit hook stop one reliably.
+    sandbox_pids_limit: int = Field(default=128, ge=16)
+    sandbox_cpus: float = Field(default=1.0, gt=0)
+    # Starting a container costs a second or so more than starting a process,
+    # which matters because the timeout is a wall clock over the whole thing.
+    sandbox_startup_grace_seconds: int = Field(default=10, ge=0)
+    # Only for the docker-out-of-docker case: when the API is itself a container
+    # talking to the host daemon, a bind mount is resolved by that daemon
+    # against the *host* filesystem, so the path the API sees is not the path to
+    # mount. Set this to the host directory that the API's models/ volume comes
+    # from and snapshot paths are rewritten before being mounted. Wrong or unset
+    # in that topology, the mount silently produces an empty directory.
+    sandbox_host_models_dir: str | None = None
     # How many tool calls one question may take before the agent must answer.
     agent_max_steps: int = Field(default=6, ge=1, le=20)
     # Per-conversation ceilings, so one session cannot bill indefinitely.
@@ -75,6 +109,34 @@ class Settings(BaseSettings):
     # Presenting this as `X-Bootstrap-Token` allows creating the first user.
     # Without it set, the registration endpoint is closed entirely.
     auth_bootstrap_token: str | None = None
+
+    # --- Per-principal limits (Phase 8) ------------------------------------
+    # The Phase 5 guards are per *conversation*, which slows one session and
+    # stops nothing: a client that opens a new conversation each time has no
+    # ceiling at all. These are per account, measured against the usage and run
+    # tables that already record every call. 0 disables a limit, which is the
+    # default — a single trusted operator should not be rate-limited by their
+    # own install.
+    principal_max_llm_calls_per_hour: int = Field(default=0, ge=0)
+    principal_daily_spend_limit_usd: float = Field(default=0.0, ge=0.0)
+    # Disk is the other exhaustible resource, and the one a paid-endpoint limit
+    # does not cover: uploading is free and training writes a model bundle.
+    principal_max_runs: int = Field(default=0, ge=0)
+    principal_storage_quota_mb: int = Field(default=0, ge=0)
+    # Workers are the third exhaustible resource and the one neither of the
+    # others covers: an account can sit under its spend and its disk quota and
+    # still occupy every worker with training runs, which is an outage for
+    # everyone else that costs the attacker almost nothing. Counted over jobs
+    # this account has queued or running right now.
+    principal_max_concurrent_jobs: int = Field(default=0, ge=0)
+
+    # --- Key lifecycle (Phase 8) -------------------------------------------
+    # More than one key may be active per account so that rotation is not an
+    # outage. A ceiling keeps "rotate" from quietly becoming "accumulate".
+    max_active_api_keys: int = Field(default=5, ge=1)
+    # 0 means keys do not expire. Set a number of days for issued keys to age
+    # out on their own; existing keys are unaffected.
+    api_key_default_ttl_days: int = Field(default=0, ge=0)
 
     # --- Artifact integrity ------------------------------------------------
     # joblib.load() executes pickle opcodes, so loading an artifact whose bytes
@@ -158,9 +220,59 @@ class Settings(BaseSettings):
         return key or None
 
 
+#: Settings whose value may instead be given as a path, via `<NAME>_FILE`.
+#: Every one of them is a credential.
+_FILE_BACKED_SECRETS = (
+    "gemini_api_key",
+    "artifact_signing_key",
+    "auth_bootstrap_token",
+    "database_url",
+)
+
+
+def _load_file_backed_secrets(settings: "Settings") -> None:
+    """Support the `<NAME>_FILE` convention for secrets.
+
+    Environment variables are readable by anything that can list a process, get
+    a core dump, or run `docker inspect`, and they end up in shell history and
+    CI logs. Docker secrets, Kubernetes secret volumes, and systemd credentials
+    all present a secret as a *file* instead — so `GEMINI_API_KEY_FILE=/run/
+    secrets/gemini` is what any of them can be pointed at without this
+    application learning about a specific secret manager.
+
+    The direct variable still works and still wins, so nothing that exists today
+    changes. A `_FILE` that cannot be read is fatal rather than ignored: falling
+    back to "no key" would look like a configuration choice.
+    """
+    import os
+
+    for field in _FILE_BACKED_SECRETS:
+        path = os.getenv(f"{field.upper()}_FILE")
+        if not path:
+            continue
+        # `model_fields_set` rather than a truthiness check on the value.
+        # `database_url` has a default — the local SQLite file — so a truthy
+        # value means "set or defaulted", which made DATABASE_URL_FILE
+        # unusable: it was every time reported as a conflict with a
+        # DATABASE_URL nobody had set, and then ignored. What matters here is
+        # whether the operator gave the variable, and this is the question that
+        # asks that.
+        if field in settings.model_fields_set:
+            # Both given. The explicit variable wins, but say so — the two
+            # disagreeing silently is how the wrong credential gets used.
+            print(f"warning: both {field.upper()} and {field.upper()}_FILE are set; using {field.upper()}")
+            continue
+        secret = Path(path).read_text(encoding="utf-8").strip()
+        if not secret:
+            raise ValueError(f"{field.upper()}_FILE points at {path}, which is empty.")
+        object.__setattr__(settings, field, secret)
+
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    _load_file_backed_secrets(settings)
+    return settings
 
 
 settings = get_settings()

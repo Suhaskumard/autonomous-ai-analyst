@@ -10,6 +10,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+import audit
 import db
 from auth import Principal, current_principal, owner_scope, require_owned_run
 from utils.helpers import METADATA_DIR
@@ -139,6 +140,15 @@ def delete_run(run_key: str, principal: Principal = Depends(current_principal)):
     logger.info(
         "Run deleted",
         extra={"run_key": run_key, "artifacts_removed": removed, "conversations_removed": conversations_removed},
+    )
+    # The dataset is gone; the record that this principal removed it is not.
+    audit.record(
+        audit.RUN_DELETED,
+        principal,
+        target_type="run",
+        target_id=run_key,
+        artifacts_removed=removed,
+        conversations_removed=conversations_removed,
     )
     return {
         "run_key": run_key,

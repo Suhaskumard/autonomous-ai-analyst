@@ -17,7 +17,7 @@ from sqlalchemy import JSON, Column, delete, text
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from config import settings
-from utils.helpers import now_utc
+from utils.helpers import as_utc, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,91 @@ class UserRecord(SQLModel, table=True):
             "is_active": self.is_active,
             "is_admin": self.is_admin,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class ApiKeyRecord(SQLModel, table=True):
+    """One issued credential. An account may hold several at once.
+
+    Phase 6 put a single key hash on the user row, which made rotation an
+    outage: the new key only works once the old one has stopped, and the two
+    cannot both be valid for the window it takes to update every caller. Keys
+    live here instead, so rotation is "issue, deploy, revoke" with no gap.
+
+    Revocation is a timestamp rather than a delete, because "which key was this
+    request made with, and when did we stop trusting it" is a question the audit
+    log has to be able to answer after the fact.
+    """
+
+    __tablename__ = "api_keys"
+
+    key_id: str = Field(primary_key=True)
+    user_id: str = Field(index=True)
+    # sha256 of the key, exactly as before — the key itself is never stored.
+    key_hash: str = Field(index=True)
+    label: str | None = None
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    expires_at: datetime | None = Field(default=None, index=True)
+    revoked_at: datetime | None = Field(default=None, index=True)
+    last_used_at: datetime | None = None
+
+    def is_active(self, moment: datetime | None = None) -> bool:
+        """Not revoked and not expired. One definition, used everywhere.
+
+        `as_utc` because a stored timestamp comes back naive while `now_utc` is
+        aware, and comparing the two raises rather than returning False — a
+        failure that would have surfaced as a 500 on authentication.
+        """
+        if self.revoked_at is not None:
+            return False
+        expires = as_utc(self.expires_at)
+        return expires is None or expires > (moment or now_utc())
+
+    def to_public(self) -> dict[str, Any]:
+        """Everything about a key except anything that would let you use it."""
+        return {
+            "key_id": self.key_id,
+            "label": self.label,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "active": self.is_active(),
+        }
+
+
+class AuditRecord(SQLModel, table=True):
+    """One privileged or destructive action, and who did it.
+
+    Append-only by convention and by the absence of any update or delete helper
+    in this module: nothing in the application edits a row here. It is also
+    outside the retention policy on purpose — the record that a dataset was
+    deleted must outlive the dataset, or "we deleted it" has no evidence.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: int | None = Field(default=None, primary_key=True)
+    at: datetime = Field(default_factory=now_utc, index=True)
+    actor_id: str = Field(default=LOCAL_OWNER_ID, index=True)
+    actor_email: str | None = None
+    action: str = Field(index=True)
+    target_type: str | None = None
+    target_id: str | None = Field(default=None, index=True)
+    detail: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    request_id: str | None = None
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "at": self.at.isoformat() if self.at else None,
+            "actor_id": self.actor_id,
+            "actor_email": self.actor_email,
+            "action": self.action,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "detail": self.detail or {},
+            "request_id": self.request_id,
         }
 
 
@@ -463,6 +548,12 @@ def create_user(user_id: str, email: str, api_key_hash: str, is_admin: bool = Fa
         return record.to_public()
 
 
+def get_user(user_id: str) -> dict[str, Any] | None:
+    with session_scope() as session:
+        row = session.get(UserRecord, user_id)
+        return row.to_public() if row else None
+
+
 def get_user_by_email(email: str) -> dict[str, Any] | None:
     with session_scope() as session:
         row = session.exec(select(UserRecord).where(UserRecord.email == email)).first()
@@ -506,6 +597,159 @@ def set_user_active(user_id: str, is_active: bool) -> dict[str, Any] | None:
         session.add(row)
         session.flush()
         return row.to_public()
+
+
+# --- API keys ---------------------------------------------------------------
+
+
+def add_api_key(
+    key_id: str,
+    user_id: str,
+    key_hash: str,
+    label: str | None = None,
+    expires_at: datetime | None = None,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        record = ApiKeyRecord(key_id=key_id, user_id=user_id, key_hash=key_hash, label=label, expires_at=expires_at)
+        session.add(record)
+        session.flush()
+        return record.to_public()
+
+
+def get_api_key_by_hash(key_hash: str) -> dict[str, Any] | None:
+    """A key row by its hash, whatever its state. The caller decides validity."""
+    with session_scope() as session:
+        row = session.exec(select(ApiKeyRecord).where(ApiKeyRecord.key_hash == key_hash)).first()
+        if row is None:
+            return None
+        return {**row.to_public(), "user_id": row.user_id, "key_hash": row.key_hash}
+
+
+def touch_api_key(key_id: str) -> None:
+    with session_scope() as session:
+        row = session.get(ApiKeyRecord, key_id)
+        if row is not None:
+            row.last_used_at = now_utc()
+            session.add(row)
+
+
+def list_api_keys(user_id: str) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        rows = session.exec(
+            select(ApiKeyRecord).where(ApiKeyRecord.user_id == user_id).order_by(ApiKeyRecord.created_at)
+        ).all()
+        return [row.to_public() for row in rows]
+
+
+def revoke_api_key(key_id: str, user_id: str) -> dict[str, Any] | None:
+    """Revoke one key. Returns None when it is not this user's to revoke."""
+    with session_scope() as session:
+        row = session.get(ApiKeyRecord, key_id)
+        if row is None or row.user_id != user_id:
+            return None
+        if row.revoked_at is None:
+            row.revoked_at = now_utc()
+            session.add(row)
+            session.flush()
+        return row.to_public()
+
+
+def count_active_api_keys(user_id: str) -> int:
+    moment = now_utc()
+    with session_scope() as session:
+        rows = session.exec(select(ApiKeyRecord).where(ApiKeyRecord.user_id == user_id)).all()
+        return len([row for row in rows if row.is_active(moment)])
+
+
+# --- audit log --------------------------------------------------------------
+
+
+def append_audit(
+    action: str,
+    actor_id: str,
+    actor_email: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    detail: dict[str, Any] | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Write one audit row. There is deliberately no update or delete partner."""
+    with session_scope() as session:
+        session.add(
+            AuditRecord(
+                action=action,
+                actor_id=actor_id,
+                actor_email=actor_email,
+                target_type=target_type,
+                target_id=target_id,
+                detail=detail or {},
+                request_id=request_id,
+            )
+        )
+
+
+def list_audit(
+    limit: int = 200,
+    actor_id: str | None = None,
+    action: str | None = None,
+    since: datetime | None = None,
+) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        query = select(AuditRecord)
+        if actor_id is not None:
+            query = query.where(AuditRecord.actor_id == actor_id)
+        if action is not None:
+            query = query.where(AuditRecord.action == action)
+        if since is not None:
+            query = query.where(AuditRecord.at >= since)
+        rows = session.exec(query.order_by(AuditRecord.at.desc(), AuditRecord.id.desc()).limit(limit)).all()
+        return [row.to_public() for row in rows]
+
+
+# --- per-principal accounting -----------------------------------------------
+
+
+def count_llm_calls_since(owner_id: str, since: datetime) -> int:
+    """Paid calls this account has made in the window — the rate limit input."""
+    with session_scope() as session:
+        rows = session.exec(
+            select(UsageRecord).where(UsageRecord.owner_id == owner_id, UsageRecord.created_at >= since)
+        ).all()
+        return len(rows)
+
+
+def spend_since(owner_id: str, since: datetime) -> float:
+    """Estimated spend for this account in the window, from the usage table."""
+    with session_scope() as session:
+        rows = session.exec(
+            select(UsageRecord).where(UsageRecord.owner_id == owner_id, UsageRecord.created_at >= since)
+        ).all()
+        return float(sum(row.estimated_cost_usd for row in rows))
+
+
+def count_runs(owner_id: str) -> int:
+    with session_scope() as session:
+        return len(session.exec(select(RunRecord).where(RunRecord.owner_id == owner_id)).all())
+
+
+#: A job in one of these states is occupying a worker, or waiting to.
+ACTIVE_JOB_STATES = ("queued", "running")
+
+
+def count_active_jobs(owner_id: str) -> int:
+    """Jobs this account has queued or running right now.
+
+    The input to the concurrency ceiling. Counted from the job table rather
+    than tracked in memory on purpose: with the RQ backend the process that
+    accepted the upload is not the process running it, and an in-memory counter
+    would be per-API-replica — which is not a limit, it is a limit multiplied by
+    however many replicas happen to be up.
+    """
+    with session_scope() as session:
+        rows = session.exec(
+            select(JobRecord).where(JobRecord.owner_id == owner_id, JobRecord.state.in_(ACTIVE_JOB_STATES))
+        ).all()
+        return len(rows)
 
 
 # --- LLM usage --------------------------------------------------------------
@@ -724,12 +968,27 @@ def delete_run(run_key: str, owner_id: str | None = None) -> bool:
 
 __all__ = [
     "LOCAL_OWNER_ID",
+    "ApiKeyRecord",
+    "AuditRecord",
     "ConversationRecord",
+    "add_api_key",
+    "append_audit",
+    "count_active_api_keys",
+    "count_active_jobs",
+    "count_llm_calls_since",
+    "count_runs",
+    "get_api_key_by_hash",
+    "list_api_keys",
+    "list_audit",
+    "revoke_api_key",
+    "spend_since",
+    "touch_api_key",
     "UsageRecord",
     "UserRecord",
     "count_users",
     "create_user",
     "expired_runs",
+    "get_user",
     "get_user_by_email",
     "get_user_by_key_hash",
     "list_users",

@@ -12,6 +12,7 @@ load_dotenv()
 
 import db
 import lifecycle
+from analyst import container as sandbox_container
 from config import settings
 from exceptions import PipelineError
 from logging_config import configure_logging, request_id_var
@@ -190,6 +191,14 @@ def readiness():
     # second process has to verify what this one wrote. See utils/artifacts.py.
     checks["artifacts"] = signing_status()
     checks["llm"] = {"ok": settings.gemini_key is not None, "configured": settings.gemini_key is not None}
+    # Reported, never fatal, and reported even when it is switched off: "how
+    # isolated is the code the model writes" is a question an operator should
+    # be able to answer from a health check rather than from reading config.py.
+    # `ok` is false only when a boundary was *asked for* and is not there —
+    # a missing runtime, or a seccomp profile that cannot be read — because that
+    # is a deployment which will refuse every analysis, and finding out here
+    # beats finding out from the first user.
+    checks["sandbox"] = sandbox_container.describe()
 
     return {
         "status": "ready",

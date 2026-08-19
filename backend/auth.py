@@ -22,11 +22,13 @@ import hashlib
 import logging
 import secrets
 from dataclasses import dataclass
+from datetime import timedelta
 
 from fastapi import Depends, Header, HTTPException
 
 import db
 from config import settings
+from utils.helpers import now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,44 @@ def hash_api_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
 
+def default_expiry():
+    """When a key issued now should expire, or None if keys do not expire."""
+    if settings.api_key_default_ttl_days <= 0:
+        return None
+    return now_utc() + timedelta(days=settings.api_key_default_ttl_days)
+
+
+def issue_key(user_id: str, label: str | None = None, ttl_days: int | None = None) -> tuple[dict, str]:
+    """Mint an additional key for an account. Returns (metadata, the key).
+
+    Additional, not replacement — that is the whole point. Rotation with a
+    single credential per account is an outage the length of the deploy: the
+    new key does not work until the old one is replaced everywhere. With two
+    valid at once it becomes issue, roll out, revoke, and nothing is refused in
+    between.
+    """
+    if db.count_active_api_keys(user_id) >= settings.max_active_api_keys:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This account already has {settings.max_active_api_keys} active keys, which is the "
+                "limit. Revoke one before issuing another."
+            ),
+        )
+
+    api_key = generate_api_key()
+    expires_at = default_expiry() if ttl_days is None else (now_utc() + timedelta(days=ttl_days) if ttl_days else None)
+    record = db.add_api_key(
+        key_id=secrets.token_hex(8),
+        user_id=user_id,
+        key_hash=hash_api_key(api_key),
+        label=(label or "").strip() or None,
+        expires_at=expires_at,
+    )
+    logger.info("API key issued", extra={"user": user_id, "key": record["key_id"]})
+    return record, api_key
+
+
 def create_user(email: str, is_admin: bool = False) -> tuple[dict, str]:
     """Create a user and return (public record, the key shown only now)."""
     email = (email or "").strip().lower()
@@ -68,24 +108,60 @@ def create_user(email: str, is_admin: bool = False) -> tuple[dict, str]:
         raise HTTPException(status_code=409, detail="That email already has an account.")
 
     api_key = generate_api_key()
+    user_id = secrets.token_hex(12)
     record = db.create_user(
-        user_id=secrets.token_hex(12),
+        user_id=user_id,
         email=email,
+        # Still written to the user row so a Phase 6 database and a Phase 8 one
+        # authenticate identically; `_principal_from_key` reads the key table
+        # first and falls back to this.
         api_key_hash=hash_api_key(api_key),
         is_admin=is_admin,
+    )
+    db.add_api_key(
+        key_id=secrets.token_hex(8),
+        user_id=user_id,
+        key_hash=hash_api_key(api_key),
+        label="initial",
+        expires_at=default_expiry(),
     )
     logger.info("User created", extra={"user": record["user_id"], "admin": is_admin})
     return record, api_key
 
 
 def _principal_from_key(api_key: str) -> Principal | None:
-    """Resolve a bearer key, in constant time with respect to the secret."""
-    row = db.get_user_by_key_hash(hash_api_key(api_key))
+    """Resolve a bearer key, in constant time with respect to the secret.
+
+    The key table is authoritative. A key issued before Phase 8 exists only on
+    the user row, so that path is kept as a fallback — an upgrade must not
+    invalidate every credential in circulation.
+    """
+    key_hash = hash_api_key(api_key)
+
+    key_row = db.get_api_key_by_hash(key_hash)
+    if key_row is not None:
+        if not secrets.compare_digest(key_row["key_hash"], key_hash):
+            return None
+        if key_row["revoked_at"] is not None:
+            logger.info("Revoked key presented", extra={"key": key_row["key_id"]})
+            return None
+        if not key_row["active"]:
+            logger.info("Expired key presented", extra={"key": key_row["key_id"]})
+            return None
+        user = db.get_user(key_row["user_id"])
+        if user is None or not user["is_active"]:
+            return None
+        db.touch_api_key(key_row["key_id"])
+        db.touch_user(user["user_id"])
+        return Principal(user_id=user["user_id"], email=user["email"], is_admin=user["is_admin"])
+
+    # Pre-Phase-8 credential: the hash lives on the user row and nowhere else.
+    row = db.get_user_by_key_hash(key_hash)
     if row is None or not row["is_active"]:
         return None
     # The lookup is by hash, but compare the stored hash again explicitly so
     # the success path does not short-circuit differently from the failure one.
-    if not secrets.compare_digest(row["api_key_hash"], hash_api_key(api_key)):
+    if not secrets.compare_digest(row["api_key_hash"], key_hash):
         return None
     db.touch_user(row["user_id"])
     return Principal(user_id=row["user_id"], email=row["email"], is_admin=row["is_admin"])

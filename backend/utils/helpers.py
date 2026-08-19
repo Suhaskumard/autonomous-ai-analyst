@@ -38,6 +38,21 @@ def now_utc_iso() -> str:
     return now_utc().isoformat()
 
 
+def as_utc(value: datetime | None) -> datetime | None:
+    """Attach UTC to a datetime that came back from the database naive.
+
+    Timestamp columns are naive and hold UTC — SQLite drops the offset on write
+    and the Postgres engine pins the session timezone to match. That is a
+    coherent contract right up to the moment Python compares a stored value
+    with `now_utc()`, which is aware, and gets `TypeError: can't compare
+    offset-naive and offset-aware datetimes`. Anything doing that comparison
+    goes through here.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
 @dataclass
 class ParseReport:
     """What actually happened while reading the file.
