@@ -53,13 +53,19 @@ def purge_expired(actor=None) -> dict:
     if not expired:
         # No entry: nothing was destroyed. A row per restart saying "deleted
         # nothing" is how an audit log becomes something nobody reads.
-        return {"runs_purged": 0, "artifacts_removed": 0, "conversations_removed": 0}
+        return {"runs_purged": 0, "artifacts_removed": 0, "conversations_removed": 0, "predictions_removed": 0}
 
-    artifacts = conversations = 0
+    artifacts = conversations = predictions = 0
     for entry in expired:
         run_key = entry["run_key"]
         artifacts += purge_run(run_key)
         conversations += db.delete_conversations_for_run(run_key)
+        # Prediction inputs are as sensitive as the training rows they resemble,
+        # so they expire with the run rather than outliving it. The audit log is
+        # the deliberate exception in the other direction: it has to survive the
+        # thing it records, and this describes a model that will not.
+        predictions += db.delete_predictions_for_run(run_key)
+        db.delete_model_versions_for_run(run_key)
         db.delete_run(run_key)
         logger.info("Purged expired run", extra={"run_key": run_key, "owner": entry["owner_id"]})
 
@@ -67,6 +73,7 @@ def purge_expired(actor=None) -> dict:
         "runs_purged": len(expired),
         "artifacts_removed": artifacts,
         "conversations_removed": conversations,
+        "predictions_removed": predictions,
     }
     logger.info("Retention purge complete", extra=summary)
     audit.record(
@@ -81,15 +88,23 @@ def purge_expired(actor=None) -> dict:
 def delete_everything_for(owner_id: str) -> dict:
     """Erase one owner's data — the answer to "delete my account's data".
 
-    Runs, artifacts, conversations and messages. Usage rows are kept, because
-    they are the billing record and carry no dataset content.
+    Runs, artifacts, conversations, messages, and the prediction log. Usage rows
+    are kept, because they are the billing record and carry no dataset content;
+    audit rows are kept for the same reason in reverse, because the record that
+    an erasure happened must outlive what it erased.
     """
     runs = db.list_runs(limit=10_000, owner_id=owner_id)
-    artifacts = conversations = 0
+    artifacts = conversations = predictions = 0
     for run in runs:
         run_key = run["run_key"]
         artifacts += purge_run(run_key)
         conversations += db.delete_conversations_for_run(run_key)
+        # "Delete my data" has to mean the predictions too. They hold feature
+        # values this account supplied, which is the same kind of data as the
+        # dataset it uploaded and is not made less personal by having been sent
+        # one row at a time.
+        predictions += db.delete_predictions_for_run(run_key)
+        db.delete_model_versions_for_run(run_key)
         db.delete_run(run_key, owner_id=owner_id)
 
     summary = {
@@ -97,6 +112,7 @@ def delete_everything_for(owner_id: str) -> dict:
         "runs_deleted": len(runs),
         "artifacts_removed": artifacts,
         "conversations_removed": conversations,
+        "predictions_removed": predictions,
     }
     logger.warning("Owner data erased", extra=summary)
     return summary
@@ -110,9 +126,11 @@ def retention_policy() -> dict:
         "storage_backend": settings.storage_backend,
         "artifacts_stored": [
             "the dataset snapshot (CSV) used for analysis and reproducibility",
-            "the fitted model bundle, HMAC-signed",
-            "run metadata: metrics, feature typing, model card",
+            "the fitted model bundle, HMAC-signed — one per version, once a run has been retrained",
+            "run metadata: metrics, feature typing, model card, the training-time drift reference",
             "analyst conversations and their tool results",
+            "the prediction log: inputs, output, model version and latency for every served prediction "
+            "(PREDICTION_LOG_INPUTS controls whether the inputs are the part kept)",
         ],
         "leaves_this_machine": [
             "your question, the column names and dtypes, and compact text summaries of tool "

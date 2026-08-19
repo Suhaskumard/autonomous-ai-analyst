@@ -20,6 +20,7 @@ from observability import CONTENT_TYPE_LATEST, init_sentry, metrics, normalise_p
 from routes.admin import router as admin_router
 from routes.chat import router as chat_router
 from routes.insights import router as insights_router
+from routes.monitoring import router as monitoring_router
 from routes.predict import router as predict_router
 from routes.profile import router as profile_router
 from routes.runs import router as runs_router
@@ -140,6 +141,7 @@ app.include_router(insights_router, prefix="/api", tags=["insights"])
 app.include_router(chat_router, prefix="/api", tags=["chat"])
 app.include_router(runs_router, prefix="/api", tags=["runs"])
 app.include_router(admin_router, prefix="/api", tags=["admin"])
+app.include_router(monitoring_router, prefix="/api", tags=["monitoring"])
 
 
 @app.get("/")

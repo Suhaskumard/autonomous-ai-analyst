@@ -79,6 +79,7 @@ backend/
     profile.py    <-- Profile a CSV without training it
     runs.py       <-- Run registry: list, reopen, compare, delete
     insights.py   <-- Lightweight per-run summary
+    monitoring.py <-- Predictions, drift, versions, retrain (Phase 9)
   ml/             <-- Core Analytical Engine
     preprocess.py <-- Target validation, feature typing (fits nothing)
     train.py      <-- Split-then-fit Pipelines, label encoding
@@ -90,7 +91,13 @@ backend/
     imbalance.py  <-- Detection, class weights, in-pipeline SMOTE
     tuning.py     <-- Budgeted randomized search
     model_card.py <-- Config, data profile, metrics, library versions
+    drift.py      <-- Population Stability Index, training vs. served inputs
+    calibration.py<-- Expected calibration error; fits & judges a fix
+    serving_schema.py <-- Renamed/missing/type-broken columns, named clearly
     quality.py, ensemble.py
+  monitoring.py   <-- Prediction logging + the monitoring view (Phase 9)
+  registry.py     <-- Model versions, champion/challenger promotion
+  retraining.py   <-- Fits a challenger, scores it against the champion
   utils/
     security.py   <-- Artifact-key validation and path resolution
     uploads.py    <-- Bounded, streamed upload handling
@@ -350,6 +357,38 @@ Generated code runs in a separate one-shot interpreter with a wall-clock timeout
 That is a restricted execution environment, not a security boundary against a determined attacker — the guards live inside the interpreter they are guarding, and arbitrary Python eventually gets underneath them. It is sound for a single trusted operator, and it is the default.
 
 Set `SANDBOX_BACKEND=container` and it stops being a convention and becomes a boundary: the same runner, in its own container with **no network namespace**, a read-only root, every capability dropped, and exactly one dataset mounted read-only. Build it with `docker build -f ops/Dockerfile.sandbox -t analyst-sandbox:latest ./backend`, then prove it with `python ops/verify_sandbox.py --build` — nine assertions against a real container, two of which are written to fail if the isolation is absent. There is no fallback: with the container backend configured and no runtime reachable, every execution fails rather than silently running unisolated. See [`docs/security.md`](docs/security.md).
+
+---
+
+## 📈 Keeping a Model Honest After It Ships
+
+Every phase before this one judged a model once, at the moment it was trained. Nothing revisited
+it. A model that was defensible in August and quietly wrong by November fails exactly the way this
+project was written about — confidently, with a number, and nothing saying otherwise. This closes
+that gap, and unlike the two sections above it is **on by default**: it only stops throwing away a
+record of what a model already did, rather than changing what a caller may do.
+
+- **Every served prediction is logged** — inputs, output, model version, latency — so an answer
+  given in August can be reproduced in November. `GET /api/predictions/{id}` returns exactly that.
+- **Drift**, measured as Population Stability Index between the training-time distribution and what
+  is actually being predicted on, read back from the log. Quantile-binned rather than equal-width,
+  which matters: an early version read a same-distribution batch as material drift on nearly every
+  trial, because equal-width bins on a skewed feature starve the tail of samples and PSI spends its
+  signal there. `GET /api/runs/{run_key}/drift`; `docs/monitoring.md` has the rest, including the
+  simulation that set the row-count floor a verdict needs before it means anything.
+- **Calibration**: a confidence shown next to a prediction is a claim about how often it is right.
+  A calibrated variant is fitted and kept only if it measurably improves the holdout's calibration
+  error — never on a marginal change that is as likely to be noise as improvement.
+- **Serving-time schema checks** name what actually broke — a rename (`spend_usd → spend`, suggested),
+  a genuine absence, or a column that stopped being numeric — instead of silently imputing a training
+  median and returning a confident number for a value nobody supplied.
+- **Retraining produces a challenger, not a replacement.** It is promoted only if it beats the
+  champion on the run's own selection metric, by a margin, on rows neither model was fitted on.
+  Every promotion — and every refusal — is audited with both scores, so "the new one is better" is
+  never asserted without the numbers that would let someone check it.
+
+See [`docs/monitoring.md`](docs/monitoring.md) for what each setting costs and the endpoints for all
+of it.
 
 ---
 

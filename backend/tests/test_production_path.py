@@ -182,6 +182,88 @@ def test_a_phase_2_database_is_brought_up_to_the_baseline(tmp_path, monkeypatch)
     db.reset_engine()
 
 
+def test_adoption_leaves_post_baseline_migrations_their_work(tmp_path, monkeypatch):
+    """Adoption builds the *baseline*, not today's models — and it matters.
+
+    The first version of this built the target from live `SQLModel.metadata`,
+    which creates every table the current models declare, and then stamped the
+    baseline. Two things broke. The loud one: the next `create_table` migration
+    failed on a table that was already there, which is how this was found. The
+    quiet one is worse — `0002` copies every existing user's key hash into
+    `api_keys`, and a database handed that table pre-made gets an empty one, so
+    every credential in circulation stops being listable or revocable while
+    still authenticating. That is a data migration silently skipped, and it
+    would have shipped.
+    """
+    import hashlib
+
+    from config import settings
+
+    database = tmp_path / "phase6.db"
+    monkeypatch.setattr(settings, "database_url", f"sqlite:///{database.as_posix()}")
+    db.reset_engine()
+
+    # A Phase 6 database: the baseline exactly, no version row, one account
+    # whose key lives on the user row because that is where Phase 6 put it.
+    #
+    # The baseline's table set is read from migrations_module._schema_by_revision()
+    # rather than hardcoded as "everything except api_keys and audit_log" — that
+    # hardcoded version is exactly the kind of list the migrations module's own
+    # docstring warns goes stale one phase later, and it did: this test passed
+    # under Phase 8 and started creating model_versions and predictions at the
+    # "baseline" the moment Phase 9 added them, colliding with migration 0003.
+    engine = db.get_engine()
+    baseline_table_names = dict(migrations_module._schema_by_revision())[migrations_module.BASELINE_REVISION]
+    baseline_tables = [table for table in SQLModel.metadata.sorted_tables if table.name in baseline_table_names]
+    SQLModel.metadata.create_all(engine, tables=baseline_tables)
+    key_hash = hashlib.sha256(b"a-key-issued-before-phase-8").hexdigest()
+    with sqlite3.connect(database) as legacy:
+        legacy.execute(
+            "INSERT INTO users (user_id, email, api_key_hash, is_admin, is_active, created_at, last_seen_at) "
+            "VALUES ('u-legacy', 'before@example.com', ?, 0, 1, '2026-08-01 10:00:00', '2026-08-02 11:00:00')",
+            (key_hash,),
+        )
+
+    db.init_db()
+
+    with db.get_engine().connect() as connection:
+        assert migrations_module.current_revision(connection) == migrations_module.head_revision()
+
+    # The migration ran, rather than finding its table already made for it.
+    keys = db.list_api_keys("u-legacy")
+    assert len(keys) == 1, "the pre-Phase-8 credential was not carried into the key table"
+    assert keys[0]["active"] is True
+    assert db.get_api_key_by_hash(key_hash)["user_id"] == "u-legacy"
+
+    db.reset_engine()
+
+
+def test_a_database_already_holding_a_later_revision_is_stamped_there(tmp_path, monkeypatch):
+    """Pre-Alembic does not mean pre-everything.
+
+    A database built by the old `create_all` startup has whatever tables the
+    models declared on the day it was made, which for anything built recently
+    includes revisions after the baseline. Stamping it at the baseline would
+    replay those migrations over tables that are already there.
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "database_url", f"sqlite:///{(tmp_path / 'recent.db').as_posix()}")
+    db.reset_engine()
+
+    # Every current table, no version row: the shape `create_all` produces today.
+    SQLModel.metadata.create_all(db.get_engine())
+    with db.get_engine().connect() as connection:
+        assert migrations_module.current_revision(connection) is None
+
+    db.init_db()
+
+    with db.get_engine().connect() as connection:
+        assert migrations_module.current_revision(connection) == migrations_module.head_revision()
+
+    db.reset_engine()
+
+
 def test_an_empty_database_gets_the_whole_chain(tmp_path, monkeypatch):
     from config import settings
 

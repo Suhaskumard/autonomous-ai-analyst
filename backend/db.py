@@ -7,6 +7,7 @@ dataset registry the Phase 3 history UI needs.
 """
 
 import logging
+import math
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -254,6 +255,131 @@ class RunRecord(SQLModel, table=True):
     # means "keep until deleted by hand"; the retention policy sets it.
     expires_at: datetime | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=now_utc, index=True)
+
+
+class PredictionRecord(SQLModel, table=True):
+    """One served prediction, so an answer given in August can be examined in November.
+
+    Everything before Phase 9 judged a model at the moment it was trained and
+    then forgot about it. This is the row that makes a served answer
+    reproducible — the inputs it was given, the model version that gave it, and
+    what it said — and it is also the raw material for drift, which needs to
+    know what the model is actually being asked about rather than what it was
+    trained on.
+
+    One row per predicted row rather than per request, because both of the jobs
+    this table has are per-row: a drift comparison needs samples, and
+    "reproduce this prediction" means one of them. A batch is tied together by
+    `request_id`, and a large batch is sampled rather than stored whole —
+    `PREDICTION_LOG_MAX_ROWS`, recorded as `sampled` so a partial log is never
+    read as a complete one.
+
+    The inputs are as sensitive as the training rows they resemble, so this
+    table is owner-scoped like everything else and is purged by the retention
+    policy — and, unlike the audit log, it is purged *with* the run it belongs
+    to. The audit log exists to outlive what it records; this exists to describe
+    a model that will not.
+    """
+
+    __tablename__ = "predictions"
+
+    prediction_id: str = Field(primary_key=True)
+    #: Groups the rows of one batch. Also the API request id, so a prediction
+    #: can be traced back to the log lines of the call that produced it.
+    request_id: str | None = Field(default=None, index=True)
+    run_key: str = Field(index=True)
+    owner_id: str = Field(default=LOCAL_OWNER_ID, index=True)
+    #: Which fitted artifact answered. Not the run key: a run can be retrained,
+    #: and "which model said this" is the question being preserved.
+    model_version: str | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    #: Of the whole request, repeated on each of its rows. A per-row latency
+    #: would be a division, not a measurement.
+    latency_ms: int = 0
+    #: The feature values this prediction was made from.
+    inputs: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    #: Always as text, so one column holds a class label and a regression
+    #: output without the reader having to know which. The numeric form is
+    #: beside it when there is one.
+    prediction: str | None = None
+    prediction_value: float | None = None
+    confidence: float | None = None
+    #: True when this row is one of a sample rather than a whole batch.
+    sampled: bool = False
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "prediction_id": self.prediction_id,
+            "request_id": self.request_id,
+            "run_key": self.run_key,
+            "model_version": self.model_version,
+            "at": self.created_at.isoformat() if self.created_at else None,
+            "latency_ms": self.latency_ms,
+            "inputs": self.inputs or {},
+            "prediction": self.prediction,
+            "prediction_value": self.prediction_value,
+            "confidence": self.confidence,
+            "sampled": self.sampled,
+        }
+
+
+class ModelVersionRecord(SQLModel, table=True):
+    """One fitted model for a run, and whether it is the one being served.
+
+    Until Phase 9 a run had exactly one model and the two were the same thing:
+    the run key addressed a dataset *and* the artifact trained from it. That
+    holds right up to the moment a model is retrained on newer data, which is
+    the entire point of retraining — the dataset has changed, so a
+    content-addressed key cannot be the identity of the model any more.
+
+    So a run owns a chain of versions, exactly one of which is champion. The
+    champion is what `/api/predict` loads and what every logged prediction names.
+    Promotion is recorded with the metric and both scores that justified it,
+    because "the new one is better" with nothing to point at is how a model gets
+    promoted for being newer.
+    """
+
+    __tablename__ = "model_versions"
+
+    version_id: str = Field(primary_key=True)
+    run_key: str = Field(index=True)
+    owner_id: str = Field(default=LOCAL_OWNER_ID, index=True)
+    #: 1, 2, 3 … within a run. Human-facing; `version_id` is what is stored on
+    #: a prediction, because it is unique across runs.
+    version: int = 1
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    #: Suffix under MODEL_DIR. Version 1 keeps the pre-Phase-9 `_model.pkl` so
+    #: that every run trained before this exists here without moving a file.
+    artifact_suffix: str = "_model.pkl"
+    selected_model: str | None = None
+    #: The metric promotion was decided on, and this version's score for it.
+    metric_name: str | None = None
+    metric_value: float | None = None
+    rows_trained: int = 0
+    is_champion: bool = Field(default=False, index=True)
+    promoted_at: datetime | None = None
+    superseded_at: datetime | None = None
+    #: "initial" | "retrain"
+    source: str = "initial"
+    #: The comparison that justified promotion, or the one that refused it.
+    notes: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "version_id": self.version_id,
+            "run_key": self.run_key,
+            "version": self.version,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "selected_model": self.selected_model,
+            "metric_name": self.metric_name,
+            "metric_value": self.metric_value,
+            "rows_trained": self.rows_trained,
+            "is_champion": self.is_champion,
+            "promoted_at": self.promoted_at.isoformat() if self.promoted_at else None,
+            "superseded_at": self.superseded_at.isoformat() if self.superseded_at else None,
+            "source": self.source,
+            "notes": self.notes or {},
+        }
 
 
 _engine = None
@@ -752,6 +878,220 @@ def count_active_jobs(owner_id: str) -> int:
         return len(rows)
 
 
+# --- prediction log (Phase 9) ------------------------------------------------
+
+
+def log_predictions(rows: list[dict[str, Any]]) -> int:
+    """Append served predictions. Returns how many were written.
+
+    Never raises. A monitoring write that fails must not turn a successful
+    prediction into a 500: the caller already has their answer, and losing the
+    record of it is much the lesser harm. Same reasoning as `audit.record`, and
+    the same shape.
+    """
+    if not rows:
+        return 0
+    try:
+        with session_scope() as session:
+            for row in rows:
+                session.add(PredictionRecord(**row))
+        return len(rows)
+    except Exception:
+        logger.exception("Could not log predictions", extra={"count": len(rows)})
+        return 0
+
+
+def list_predictions(
+    run_key: str,
+    limit: int = 500,
+    owner_id: str | None = None,
+    since: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Most recent first — the newest predictions are the ones drift is about."""
+    with session_scope() as session:
+        query = select(PredictionRecord).where(PredictionRecord.run_key == run_key)
+        if owner_id is not None:
+            query = query.where(PredictionRecord.owner_id == owner_id)
+        if since is not None:
+            query = query.where(PredictionRecord.created_at >= since)
+        rows = session.exec(query.order_by(PredictionRecord.created_at.desc()).limit(limit)).all()
+        return [row.to_public() for row in rows]
+
+
+def get_prediction(prediction_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+    """One logged prediction — the reproduce-this-answer entry point."""
+    with session_scope() as session:
+        row = session.get(PredictionRecord, prediction_id)
+        if row is None or (owner_id is not None and row.owner_id != owner_id):
+            return None
+        return row.to_public()
+
+
+def prediction_stats(run_key: str, owner_id: str | None = None, since: datetime | None = None) -> dict[str, Any]:
+    """Volume and latency for the monitoring view.
+
+    Latency percentiles are computed in Python over the window rather than in
+    SQL, because SQLite has no percentile function and the window is bounded by
+    the retention policy anyway. If that stops being true, this is the thing to
+    move into the database.
+    """
+    # Every value this function needs is pulled out of the ORM rows while the
+    # session that loaded them is still open. `PredictionRecord` instances do
+    # not survive `session_scope()` closing — an attribute touched afterward is
+    # a lazy-load against a session that no longer exists, which is a
+    # `DetachedInstanceError` rather than a stale-but-readable value. This
+    # function raised exactly that the first time it was exercised through a
+    # real route, because the aggregation below used to run after the `with`
+    # block rather than inside it.
+    with session_scope() as session:
+        query = select(PredictionRecord).where(PredictionRecord.run_key == run_key)
+        if owner_id is not None:
+            query = query.where(PredictionRecord.owner_id == owner_id)
+        if since is not None:
+            query = query.where(PredictionRecord.created_at >= since)
+        rows = session.exec(query).all()
+
+        if not rows:
+            return {"count": 0, "first_at": None, "last_at": None, "latency_ms": {}, "per_day": [], "versions": {}}
+
+        latencies = sorted(row.latency_ms for row in rows if row.latency_ms)
+        timestamps = sorted(row.created_at for row in rows if row.created_at)
+
+        per_day: dict[str, int] = {}
+        versions: dict[str, int] = {}
+        for row in rows:
+            if row.created_at:
+                day = row.created_at.date().isoformat()
+                per_day[day] = per_day.get(day, 0) + 1
+            key = row.model_version or "unversioned"
+            versions[key] = versions.get(key, 0) + 1
+
+        return {
+            "count": len(rows),
+            "first_at": timestamps[0].isoformat() if timestamps else None,
+            "last_at": timestamps[-1].isoformat() if timestamps else None,
+            "latency_ms": {
+                "p50": _percentile(latencies, 0.50),
+                "p95": _percentile(latencies, 0.95),
+                "max": latencies[-1] if latencies else None,
+            },
+            "per_day": [{"date": date, "count": count} for date, count in sorted(per_day.items())],
+            "versions": versions,
+        }
+
+
+def _percentile(ordered: list[int], fraction: float) -> int | None:
+    """Nearest-rank percentile over an already-sorted list."""
+    if not ordered:
+        return None
+    index = min(len(ordered) - 1, max(0, math.ceil(fraction * len(ordered)) - 1))
+    return int(ordered[index])
+
+
+def delete_predictions_for_run(run_key: str) -> int:
+    """Purge a run's prediction log. Called when the run itself goes."""
+    with session_scope() as session:
+        rows = session.exec(select(PredictionRecord).where(PredictionRecord.run_key == run_key)).all()
+        for row in rows:
+            session.delete(row)
+        return len(rows)
+
+
+def count_predictions(owner_id: str | None = None) -> int:
+    with session_scope() as session:
+        query = select(PredictionRecord)
+        if owner_id is not None:
+            query = query.where(PredictionRecord.owner_id == owner_id)
+        return len(session.exec(query).all())
+
+
+# --- model versions (Phase 9) ------------------------------------------------
+
+
+def add_model_version(**fields: Any) -> dict[str, Any]:
+    with session_scope() as session:
+        record = ModelVersionRecord(**fields)
+        session.add(record)
+        session.flush()
+        return record.to_public()
+
+
+def list_model_versions(run_key: str, owner_id: str | None = None) -> list[dict[str, Any]]:
+    """Oldest first: this is a history, and a history reads forwards."""
+    with session_scope() as session:
+        query = select(ModelVersionRecord).where(ModelVersionRecord.run_key == run_key)
+        if owner_id is not None:
+            query = query.where(ModelVersionRecord.owner_id == owner_id)
+        rows = session.exec(query.order_by(ModelVersionRecord.version)).all()
+        return [row.to_public() for row in rows]
+
+
+def champion_version(run_key: str, owner_id: str | None = None) -> dict[str, Any] | None:
+    """The version currently served, with the suffix needed to load it."""
+    with session_scope() as session:
+        query = select(ModelVersionRecord).where(
+            ModelVersionRecord.run_key == run_key,
+            ModelVersionRecord.is_champion.is_(True),
+        )
+        if owner_id is not None:
+            query = query.where(ModelVersionRecord.owner_id == owner_id)
+        row = session.exec(query.order_by(ModelVersionRecord.version.desc())).first()
+        if row is None:
+            return None
+        return {**row.to_public(), "artifact_suffix": row.artifact_suffix}
+
+
+def next_model_version(run_key: str) -> int:
+    with session_scope() as session:
+        rows = session.exec(select(ModelVersionRecord).where(ModelVersionRecord.run_key == run_key)).all()
+        return max((row.version for row in rows), default=0) + 1
+
+
+def promote_model_version(version_id: str, notes: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Make one version champion and demote whichever held it.
+
+    Both sides in one transaction: a run with two champions serves whichever the
+    query happens to order first, and a run with none serves nothing at all.
+    """
+    moment = now_utc()
+    with session_scope() as session:
+        target = session.get(ModelVersionRecord, version_id)
+        if target is None:
+            return None
+
+        incumbents = session.exec(
+            select(ModelVersionRecord).where(
+                ModelVersionRecord.run_key == target.run_key,
+                ModelVersionRecord.is_champion.is_(True),
+            )
+        ).all()
+        for incumbent in incumbents:
+            if incumbent.version_id == version_id:
+                continue
+            incumbent.is_champion = False
+            incumbent.superseded_at = moment
+            session.add(incumbent)
+
+        target.is_champion = True
+        target.promoted_at = moment
+        target.superseded_at = None
+        if notes:
+            target.notes = {**(target.notes or {}), **notes}
+        session.add(target)
+        session.flush()
+        return target.to_public()
+
+
+def delete_model_versions_for_run(run_key: str) -> list[str]:
+    """Remove a run's version rows. Returns the artifact suffixes to unlink."""
+    with session_scope() as session:
+        rows = session.exec(select(ModelVersionRecord).where(ModelVersionRecord.run_key == run_key)).all()
+        suffixes = [row.artifact_suffix for row in rows]
+        for row in rows:
+            session.delete(row)
+        return suffixes
+
+
 # --- LLM usage --------------------------------------------------------------
 
 
@@ -969,17 +1309,31 @@ def delete_run(run_key: str, owner_id: str | None = None) -> bool:
 __all__ = [
     "LOCAL_OWNER_ID",
     "ApiKeyRecord",
+    "ModelVersionRecord",
+    "PredictionRecord",
     "AuditRecord",
     "ConversationRecord",
     "add_api_key",
+    "add_model_version",
     "append_audit",
     "count_active_api_keys",
+    "champion_version",
     "count_active_jobs",
     "count_llm_calls_since",
+    "count_predictions",
     "count_runs",
+    "delete_model_versions_for_run",
+    "delete_predictions_for_run",
     "get_api_key_by_hash",
     "list_api_keys",
+    "get_prediction",
     "list_audit",
+    "list_model_versions",
+    "list_predictions",
+    "log_predictions",
+    "next_model_version",
+    "prediction_stats",
+    "promote_model_version",
     "revoke_api_key",
     "spend_since",
     "touch_api_key",

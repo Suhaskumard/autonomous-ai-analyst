@@ -131,6 +131,10 @@ def delete_run(run_key: str, principal: Principal = Depends(current_principal)):
     # deleting the dataset but keeping the transcript of questions asked about
     # it would leave the most sensitive part behind.
     conversations_removed = db.delete_conversations_for_run(run_key)
+    # Predictions and model versions are about this run and have no meaning
+    # without it — same reasoning as conversations, one line up.
+    predictions_removed = db.delete_predictions_for_run(run_key)
+    db.delete_model_versions_for_run(run_key)
     # Removes the metadata, the snapshot, the model and its signature, locally
     # and from object storage — a delete that left the bucket copy behind would
     # be a deletion endpoint that does not delete.
@@ -139,7 +143,12 @@ def delete_run(run_key: str, principal: Principal = Depends(current_principal)):
         raise HTTPException(status_code=404, detail="No run found for this key.")
     logger.info(
         "Run deleted",
-        extra={"run_key": run_key, "artifacts_removed": removed, "conversations_removed": conversations_removed},
+        extra={
+            "run_key": run_key,
+            "artifacts_removed": removed,
+            "conversations_removed": conversations_removed,
+            "predictions_removed": predictions_removed,
+        },
     )
     # The dataset is gone; the record that this principal removed it is not.
     audit.record(
@@ -149,10 +158,12 @@ def delete_run(run_key: str, principal: Principal = Depends(current_principal)):
         target_id=run_key,
         artifacts_removed=removed,
         conversations_removed=conversations_removed,
+        predictions_removed=predictions_removed,
     )
     return {
         "run_key": run_key,
         "deleted": True,
         "artifacts_removed": removed,
         "conversations_removed": conversations_removed,
+        "predictions_removed": predictions_removed,
     }

@@ -8,11 +8,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 
 import db
 import limits
+import registry
 from auth import Principal, current_principal
 from config import settings
 from exceptions import DatasetTooLargeError, DatasetTooSmallError, PipelineError
 from lifecycle import expiry_for_new_run
 from logging_config import job_id_var
+from ml import calibration, drift
 from ml.diagnostics import build_diagnostics
 from ml.evaluate import per_class_report
 from ml.explain import explain_pipeline
@@ -219,6 +221,11 @@ def _run_upload_pipeline(
             # here keeps the history consistent when artifacts outlive their
             # registry row — a fresh database, a restored volume, a deleted row.
             _register_run(metadata, filename, owner_id)
+            # Same reasoning for the model registry: the bundle on disk is a
+            # version whether or not this process is the one that fitted it, and
+            # a run whose champion is unregistered serves from the fallback path
+            # and reports `versioned: false` to everyone who asks.
+            registry.register_initial(run_key, owner_id, metadata)
             metrics.observe_training("reused")
             db.complete_job(
                 job_id,
@@ -314,6 +321,34 @@ def _run_upload_pipeline(
         # Attribution needs a preprocessor+model Pipeline, which a vote is not.
         explain_source = trained_models[best_model_name]
         selected_predictions = selected_pipeline.predict(trained["X_test"])
+
+        # Is the confidence this model reports actually a probability? The UI
+        # shows one next to every classification, and nothing has ever checked
+        # it. A calibrated variant is fitted on the development split and kept
+        # only if it measurably improves the holdout's calibration error; see
+        # ml/calibration.py for why the decision is made that way and what it
+        # costs. A regressor, or a model with no predict_proba, falls straight
+        # through with a reason recorded.
+        db.append_step(job_id, "Checking whether the reported confidences are honest", 88)
+        calibration_report = calibration.calibrate(
+            selected_pipeline,
+            problem_type,
+            trained["X_train"],
+            trained["y_train"],
+            trained["X_test"],
+            trained["y_test"],
+            n_classes=len(trained["class_names"]) if trained["class_names"] else 0,
+            enabled=settings.calibrate_probabilities,
+        )
+        if calibration_report["applied"]:
+            # The served model becomes the calibrated one. `selected_predictions`
+            # is deliberately *not* recomputed: calibration changes probabilities
+            # and can change the odd argmax with them, but the diagnostics,
+            # per-class report and health verdict below all describe the model
+            # that was selected, and quietly swapping the predictions under them
+            # would leave a confusion matrix that no longer matches its scores.
+            selected_pipeline = calibration_report["pipeline"]
+            db.append_step(job_id, calibration_report["reason"], 89)
 
         db.append_step(
             job_id,
@@ -494,6 +529,14 @@ def _run_upload_pipeline(
             "feature_importance": feature_importance,
             "insights": insights,
             "summary_stats": summary_stats,
+            # The distribution each feature had at training time, kept so that
+            # what the model is asked about later can be compared with what it
+            # learned from. `charts` looks like it would do — and is what a run
+            # trained before Phase 9 falls back to — but it was built to be
+            # drawn: five columns of each kind, ten categories each. This covers
+            # every feature.
+            "drift_reference": drift.build_reference(df, prepared["feature_columns"]),
+            "calibration": calibration.to_metadata(calibration_report),
         }
         with metadata_path.open("w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, default=str)
@@ -501,6 +544,11 @@ def _run_upload_pipeline(
         # Registry row: what the Phase 3 history UI lists. Built from the same
         # metadata a cache hit would read, so both paths register identically.
         _register_run(metadata, filename, owner_id)
+
+        # And the model registry: this bundle is version 1 and champion. Written
+        # after the run row because a version pointing at a run nothing lists is
+        # harder to reason about than a run whose version arrives a moment later.
+        registry.register_initial(run_key, owner_id, metadata)
 
         # Mirror the finished artifacts to durable storage, so another web
         # process can serve predictions for this run. Deliberately after the

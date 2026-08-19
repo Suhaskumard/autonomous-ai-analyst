@@ -73,7 +73,7 @@ def test_predict_rejects_missing_feature_columns(client, fixture_csv, trained_jo
     run_key = trained_job["result"]["run_key"]
     response = client.post(f"/api/predict/{run_key}", files={"file": ("p.csv", io.BytesIO(b"age\n30\n"), "text/csv")})
     assert response.status_code == 400
-    assert "Missing required features" in response.json()["detail"]
+    assert "Missing required column(s)" in response.json()["detail"]
 
 
 def test_insights_endpoint_mirrors_the_result(client, trained_job):

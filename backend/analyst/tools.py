@@ -300,15 +300,21 @@ def _plot_code(kind: str, x: str, y: str | None, bins: int) -> str:
     return header + body + "\n" + title + "fig.tight_layout()"
 
 
-def run_model(metadata: dict, rows: list[dict], run_key: str) -> dict:
-    """Predict with the run's own fitted model, on rows the user supplies."""
+def run_model(metadata: dict, rows: list[dict], run_key: str, owner_id: str | None = None) -> dict:
+    """Predict with the run's own fitted model, on rows the user supplies.
+
+    `owner_id` is threaded through because this goes down the same path a direct
+    prediction does, logging included. Without it the agent's predictions would
+    be recorded against the implicit local owner while the caller was somebody
+    else — invisible in that account's monitoring, and mixed into another's.
+    """
     if not rows:
         return _fail("Provide at least one row to predict on.")
 
     from routes.predict import predict_rows
 
     try:
-        prediction = predict_rows(run_key, pd.DataFrame(rows))
+        prediction = predict_rows(run_key, pd.DataFrame(rows), owner_id=owner_id)
     except Exception as exc:
         return _fail(f"Prediction failed: {exc}")
 
@@ -337,7 +343,9 @@ def run_python(code: str, snapshot_path) -> dict:
 # --- schemas the provider advertises ---------------------------------------
 
 
-def build_toolset(df: pd.DataFrame, metadata: dict, snapshot_path, run_key: str) -> dict[str, Tool]:
+def build_toolset(
+    df: pd.DataFrame, metadata: dict, snapshot_path, run_key: str, owner_id: str | None = None
+) -> dict[str, Tool]:
     """Bind the tools to one run's data. Names/schemas are provider-agnostic."""
     columns = [str(c) for c in df.columns]
     column_enum = {"type": "string", "description": f"One of: {', '.join(columns[:40])}"}
@@ -446,7 +454,7 @@ def build_toolset(df: pd.DataFrame, metadata: dict, snapshot_path, run_key: str)
                 },
                 "required": ["rows"],
             },
-            run=lambda rows: run_model(metadata, rows, run_key),
+            run=lambda rows: run_model(metadata, rows, run_key, owner_id),
         ),
         "run_python": Tool(
             name="run_python",

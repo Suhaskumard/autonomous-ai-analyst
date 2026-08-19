@@ -116,6 +116,30 @@ class _Metrics:
             ["outcome"],
             registry=self.registry,
         )
+        self.predictions = Counter(
+            "analyst_predictions_total",
+            "Served predictions, by outcome. Phase 9.",
+            ["outcome"],
+            registry=self.registry,
+        )
+        self.prediction_seconds = Histogram(
+            "analyst_prediction_seconds",
+            "Prediction request duration.",
+            registry=self.registry,
+            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+        )
+        self.retrainings = Counter(
+            "analyst_retrainings_total",
+            "Retraining attempts, by whether the challenger was promoted.",
+            ["promoted"],
+            registry=self.registry,
+        )
+        # Deliberately no per-run drift gauge: Phase 6 bounded every label to
+        # avoid one series per dataset becoming a memory leak
+        # (observability.normalise_path exists for exactly this reason), and a
+        # run key is precisely the kind of value that rule excludes. Drift
+        # status is a per-run question and belongs behind
+        # GET /api/runs/{run_key}/drift, not in an unbounded metric series.
         self.artifact_bytes = Gauge(
             "analyst_artifact_bytes",
             "Bytes of local artifact storage in use.",
@@ -152,6 +176,18 @@ class _Metrics:
         if not self.enabled:
             return
         self.sandbox_runs.labels(outcome=outcome).inc()
+
+    def observe_prediction(self, outcome: str, seconds: float | None = None) -> None:
+        if not self.enabled:
+            return
+        self.predictions.labels(outcome=outcome).inc()
+        if seconds is not None:
+            self.prediction_seconds.observe(seconds)
+
+    def observe_retraining(self, promoted: bool) -> None:
+        if not self.enabled:
+            return
+        self.retrainings.labels(promoted=str(promoted).lower()).inc()
 
     def render(self) -> bytes:
         if not self.enabled:

@@ -266,3 +266,9 @@ Do it after the drills on this page, not before. Every ceiling in Phase 8 is
 enforced against tables — `llm_usage`, `runs`, `jobs` — that a single-process
 SQLite install and a multi-replica Postgres one disagree about, and there is no
 point tuning a limit against the substitute.
+
+Phase 9 is written too, and lives in [`docs/monitoring.md`](monitoring.md):
+prediction logging, drift detection, calibration, serving-time schema checks,
+and champion/challenger retraining. It is mostly on by default rather than
+opt-in — the difference from Phase 8 is deliberate, since it only stops
+throwing away a record of what a model already did.

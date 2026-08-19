@@ -13,12 +13,33 @@ only ever ran as far as whichever phase last touched that machine. The real one
 in this repo has two of the six tables and none of Phase 6's columns.
 
 So adoption is a three-step: bring the database up to what `create_all` would
-have produced, stamp it at the baseline (which is exactly that), then upgrade
+have produced, stamp it at the revision it actually satisfies, then upgrade
 normally. The additive column patch is the last surviving piece of the old
 helper and runs only on this path, once, for a database that predates Alembic.
+
+Two things about that middle step are easy to get wrong, and the first version
+of this module got both:
+
+* **"What `create_all` would have produced" means at the baseline, not today.**
+  Building it from live `SQLModel.metadata` creates every table the *current*
+  models declare, including ones added by later revisions — and then stamping
+  the baseline makes the next `create_table` migration fail on a table that is
+  already there. The target schema is therefore read from the baseline
+  migration itself, by replaying it on a scratch database, so it stays correct
+  as revisions are added without anyone having to remember this.
+* **The stamp is not always the baseline.** A database can predate Alembic and
+  still have a later revision's tables — anything built by the old `create_all`
+  after that revision's models existed. Stamping it at the baseline would
+  replay migrations over tables that are already there. So the chain is walked
+  forward and the database is stamped at the newest revision it already
+  satisfies.
+
+Both are decided by reading the migration scripts, never by a hardcoded list of
+tables: a list is a thing that goes stale silently, one phase later.
 """
 
 import logging
+from functools import lru_cache
 from pathlib import Path
 
 from alembic import command
@@ -107,8 +128,87 @@ def _legacy_column_default(column) -> str | None:
     return None
 
 
-def _adopt_pre_alembic_schema(connection) -> None:
-    """Bring a pre-Phase-7 database to the baseline, then stamp it there.
+@lru_cache(maxsize=1)
+def _schema_by_revision() -> list[tuple[str, dict[str, set[str]]]]:
+    """[(revision, {table: {columns}})] after each revision, oldest first.
+
+    Built by replaying the whole chain on a throwaway in-memory SQLite database
+    and inspecting it between steps. That is more work than a hardcoded table
+    list and it is the reason this keeps working: the migration scripts are the
+    definition of every schema this application has ever had, so anything
+    derived from them cannot disagree with them. A list maintained by hand
+    would be right today and quietly wrong one phase from now — which is
+    exactly how the bug this replaced got in.
+
+    SQLite is fine as the scratch dialect even when the real database is
+    Postgres: what is wanted here is the *names*, and those do not vary.
+    """
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import create_engine
+
+    script = ScriptDirectory.from_config(alembic_config())
+    # `walk_revisions` yields newest first; the chain has to be replayed the
+    # other way round.
+    revisions = [revision.revision for revision in reversed(list(script.walk_revisions()))]
+
+    schema: list[tuple[str, dict[str, set[str]]]] = []
+    engine = create_engine("sqlite://")
+    try:
+        with engine.begin() as connection:
+            config = alembic_config(connection)
+            for revision in revisions:
+                command.upgrade(config, revision)
+                inspector = inspect(connection)
+                schema.append(
+                    (
+                        revision,
+                        {
+                            table: {column["name"] for column in inspector.get_columns(table)}
+                            for table in inspector.get_table_names()
+                            if table != "alembic_version"
+                        },
+                    )
+                )
+    finally:
+        engine.dispose()
+    return schema
+
+
+def _satisfies(connection, expected: dict[str, set[str]]) -> bool:
+    """Whether this database already has every table and column `expected` names.
+
+    Deliberately a subset test, not an equality one. A database being adopted
+    may carry columns from a later revision, or columns this application has
+    never declared; neither means it is missing the revision being checked.
+    """
+    inspector = inspect(connection)
+    present = set(inspector.get_table_names())
+    for table, columns in expected.items():
+        if table not in present:
+            return False
+        if not columns <= {column["name"] for column in inspector.get_columns(table)}:
+            return False
+    return True
+
+
+def _revision_already_satisfied(connection) -> str:
+    """The newest revision whose schema this database already has.
+
+    Walked forward and stopped at the first gap rather than scanning for the
+    best match: revisions are a chain, and a database that has revision 3's
+    tables but not revision 2's is not "at 3", it is inconsistent, and stamping
+    it at 3 would skip a migration it genuinely needs.
+    """
+    stamp = BASELINE_REVISION
+    for revision, expected in _schema_by_revision():
+        if not _satisfies(connection, expected):
+            break
+        stamp = revision
+    return stamp
+
+
+def _adopt_pre_alembic_schema(connection) -> str:
+    """Bring a pre-Phase-7 database to the baseline, then stamp what it has.
 
     `create_all` adds the tables that phase never created — a Phase 2 database
     has `jobs` and `runs` and nothing else. The column loop is what the retired
@@ -117,27 +217,44 @@ def _adopt_pre_alembic_schema(connection) -> None:
     there is no Alembic revision that adds it, because the baseline *includes*
     it.
 
+    Both halves are scoped to the **baseline** schema rather than to today's
+    models. Creating a later revision's tables here would leave nothing for that
+    revision's `create_table` to do but fail — and, worse, would skip the data
+    migration that goes with it. `0002` copies every existing user's key hash
+    into `api_keys`; a database handed that table pre-made by `create_all` gets
+    an empty one, and every credential in circulation silently stops being
+    listable or revocable.
+
     A column backfilled this way is nullable where the baseline says NOT NULL —
     SQLite cannot add a NOT NULL column to a populated table without a default
     for it. The result is compatible rather than identical; a database that has
     to match the baseline exactly needs a dump and a reload into a fresh one.
+
+    Returns the revision it stamped, which is not always the baseline: see
+    `_revision_already_satisfied`.
     """
     from sqlmodel import SQLModel
 
     inspector = inspect(connection)
     existing = set(inspector.get_table_names())
+    baseline = dict(_schema_by_revision())[BASELINE_REVISION]
 
-    SQLModel.metadata.create_all(connection, checkfirst=True)
-    created = sorted(set(inspect(connection).get_table_names()) - existing)
-    if created:
-        logger.info("Created tables missing from a pre-Alembic database: %s", ", ".join(created))
+    missing = [
+        table for table in SQLModel.metadata.sorted_tables if table.name in baseline and table.name not in existing
+    ]
+    if missing:
+        SQLModel.metadata.create_all(connection, tables=missing, checkfirst=True)
+        logger.info(
+            "Created baseline tables missing from a pre-Alembic database: %s",
+            ", ".join(sorted(table.name for table in missing)),
+        )
 
     for table in SQLModel.metadata.sorted_tables:
-        if table.name not in existing:
-            continue  # just created, so it is already the baseline shape
+        if table.name not in existing or table.name not in baseline:
+            continue  # just created, or introduced after the baseline
         present = {column["name"] for column in inspector.get_columns(table.name)}
         for column in table.columns:
-            if column.name in present:
+            if column.name in present or column.name not in baseline[table.name]:
                 continue
             ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column.type.compile(connection.dialect)}'
             default = _legacy_column_default(column)
@@ -146,7 +263,9 @@ def _adopt_pre_alembic_schema(connection) -> None:
             logger.info("Backfilling %s.%s into a pre-Alembic database", table.name, column.name)
             connection.execute(text(ddl))
 
-    command.stamp(alembic_config(connection), BASELINE_REVISION)
+    stamp = _revision_already_satisfied(connection)
+    command.stamp(alembic_config(connection), stamp)
+    return stamp
 
 
 def upgrade_to_head(engine) -> str | None:
@@ -155,8 +274,8 @@ def upgrade_to_head(engine) -> str | None:
         _take_migration_lock(connection)
         version = current_revision(connection)
         if version is None and _SENTINEL_TABLE in set(inspect(connection).get_table_names()):
-            logger.info("Adopting a pre-Alembic schema and stamping it at %s", BASELINE_REVISION)
-            _adopt_pre_alembic_schema(connection)
+            stamped = _adopt_pre_alembic_schema(connection)
+            logger.info("Adopted a pre-Alembic schema and stamped it at %s", stamped)
 
         config = alembic_config(connection)
         command.upgrade(config, "head")

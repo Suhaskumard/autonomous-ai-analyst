@@ -41,10 +41,28 @@ RUN_DELETED = "run.deleted"
 ACCOUNT_DATA_ERASED = "account.data_erased"
 RETENTION_PURGED = "retention.purged"
 QUOTA_REFUSED = "quota.refused"
+#: Phase 9. Promotion changes what every caller of a run is served from that
+#: moment on, which makes it destructive in the way that matters here: the
+#: answer someone got yesterday is not the answer they get today, and the
+#: reason has to be attributable. A challenger that was *not* promoted is
+#: recorded too — "we tried and kept the old one" is the more interesting row
+#: six months later, and a log that only holds successes cannot show restraint.
+MODEL_PROMOTED = "model.promoted"
+MODEL_CHALLENGED = "model.challenged"
 
 #: Actions a non-admin may see about themselves. Everything else is admin-only,
 #: because "which admin deactivated whom" is not an account holder's business.
-SELF_VISIBLE = frozenset({KEY_ISSUED, KEY_REVOKED, RUN_DELETED, ACCOUNT_DATA_ERASED, QUOTA_REFUSED})
+SELF_VISIBLE = frozenset(
+    {
+        KEY_ISSUED,
+        KEY_REVOKED,
+        RUN_DELETED,
+        ACCOUNT_DATA_ERASED,
+        QUOTA_REFUSED,
+        MODEL_PROMOTED,
+        MODEL_CHALLENGED,
+    }
+)
 
 
 def record(

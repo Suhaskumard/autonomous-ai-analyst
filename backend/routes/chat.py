@@ -218,7 +218,7 @@ def chat(req: ChatRequest, principal: Principal = Depends(current_principal)):
     turns = _turns_from_history(history)
     turns, trimmed = trim_to_budget(turns, settings.chat_token_budget // 2)
 
-    toolset = build_toolset(df, metadata, snapshot_path, run_key)
+    toolset = build_toolset(df, metadata, snapshot_path, run_key, owner_scope(principal) or db.LOCAL_OWNER_ID)
     result = run_agent(provider, _system_prompt(metadata, df), turns, toolset)
 
     answer = result.answer

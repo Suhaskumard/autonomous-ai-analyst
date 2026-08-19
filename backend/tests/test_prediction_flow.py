@@ -80,7 +80,10 @@ def test_single_row_numeric_strings_are_coerced(client, trained):
 def test_single_row_requires_every_feature(client, trained):
     response = client.post(f"/api/predict/{trained['run_key']}/row", json={"row": {"age": 30}})
     assert response.status_code == 400
-    assert "Missing required features" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "Missing required column(s)" in detail
+    # Named, not counted: "2 columns are missing" sends someone back to the docs.
+    assert "spend" in detail and "region" in detail
 
 
 def test_single_row_rejects_an_empty_body(client, trained):

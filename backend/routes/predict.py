@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import Any
 
 import numpy as np
@@ -7,11 +8,16 @@ import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from auth import Principal, current_principal, require_owned_run
+import db
+import monitoring
+import registry
+from auth import Principal, current_principal, owner_scope, require_owned_run
 from exceptions import ArtifactError
+from ml import serving_schema
 from ml.ensemble import ensemble_predict
+from observability import metrics
 from utils.artifacts import load_bundle
-from utils.helpers import METADATA_DIR, MODEL_DIR, read_csv_with_report
+from utils.helpers import METADATA_DIR, read_csv_with_report
 from utils.security import artifact_path, validate_dataset_hash
 from utils.storage import ensure_local
 from utils.uploads import read_upload_to_temp
@@ -38,16 +44,40 @@ def _decode(preds, label_encoder):
         return preds
 
 
-def _load_bundle(run_key: str) -> tuple[dict, dict]:
-    """Validate the key, then load metadata and the fitted model bundle."""
+def _load_bundle(run_key: str, owner_id: str | None = None) -> tuple[dict, dict, dict]:
+    """Validate the key, then load metadata and the champion model bundle.
+
+    Returns (metadata, bundle, version). The version is what says *which* model
+    answered — a run can now hold several, and "the model said 0.83" stops
+    being reproducible the moment a retrain lands if nothing recorded which one
+    it was.
+    """
     validate_dataset_hash(run_key)
     metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
-    model_path = artifact_path(MODEL_DIR, run_key, "_model.pkl")
 
     # With object storage the run may have been trained by a different web
     # process that this one shares no disk with, so "missing" is only true
     # after the bucket has been asked. A no-op on the local backend.
     ensure_local(run_key)
+
+    version = registry.resolve(run_key, owner_id=owner_id)
+    model_path = registry.model_path_for(run_key, version["artifact_suffix"])
+    if version["versioned"] and not model_path.exists():
+        # The registry names a bundle that is not on this disk. Falling back to
+        # the original artifact would serve a model other than the champion and
+        # log it under the champion's version, which is worse than refusing:
+        # the record would say something untrue and nothing would look wrong.
+        logger.error(
+            "Champion artifact missing",
+            extra={"run_key": run_key, "version": version["version"], "path": str(model_path)},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"The model version currently promoted for this run (v{version['version']}) is not "
+                "available on this server. It may still be publishing; try again shortly."
+            ),
+        )
 
     if not (metadata_path.exists() and model_path.exists()):
         raise HTTPException(status_code=404, detail="No trained artifacts found for this run key.")
@@ -60,7 +90,7 @@ def _load_bundle(run_key: str) -> tuple[dict, dict]:
     bundle = load_bundle(model_path)
     if not isinstance(bundle, dict) or "pipelines" not in bundle:
         raise ArtifactError("Stored artifact predates the current pipeline. Re-upload the dataset to retrain.")
-    return metadata, bundle
+    return metadata, bundle, version
 
 
 def _predict_frame(bundle: dict, X: pd.DataFrame, run_key: str):
@@ -95,6 +125,7 @@ def _build_response(
     raw_preds,
     probabilities,
     parse_warnings: list[str],
+    version: dict | None = None,
 ) -> dict:
     """One response shape for both the CSV and single-row entry points."""
     label_encoder = bundle.get("label_encoder")
@@ -118,6 +149,7 @@ def _build_response(
             }
         rows.append(entry)
 
+    calibration = metadata.get("calibration") or {}
     return {
         "run_key": run_key,
         "dataset_hash": metadata.get("dataset_hash"),
@@ -127,6 +159,22 @@ def _build_response(
         "features": list(X.columns),
         "class_names": class_names,
         "parse_warnings": parse_warnings,
+        # Which model answered. A run can hold several versions once it has
+        # been retrained, and a confidence with no model behind it cannot be
+        # checked later.
+        "model_version": (version or {}).get("version_id"),
+        "model_version_number": (version or {}).get("version"),
+        # A displayed confidence is a claim about how often the prediction is
+        # right. Saying whether that claim has been calibrated — and by how far
+        # it was off when measured — is the difference between a number and an
+        # honest number.
+        "confidence_is_calibrated": bool(calibration.get("confidence_is_calibrated")),
+        "calibration": {
+            "verdict": calibration.get("verdict", "unmeasured"),
+            "expected_calibration_error": ((calibration.get("after") or calibration.get("before")) or {}).get("ece"),
+        }
+        if probabilities is not None
+        else None,
         "rows": rows,
         # Kept flat for callers that only want the labels.
         "predictions": [row["prediction"] for row in rows],
@@ -136,26 +184,58 @@ def _build_response(
 
 
 def _align_features(df: pd.DataFrame, bundle: dict, metadata: dict) -> pd.DataFrame:
+    """Check the frame against what the model expects, then narrow it.
+
+    The old version of this said `Missing required features: [\'spend\']` and
+    stopped, which is correct and nearly useless to someone looking at a file
+    that plainly has a spend column in it, spelled differently. It also said
+    nothing at all about a column that was numeric at training time and is
+    arriving as text — that one went into the pipeline, got imputed to the
+    training median, and produced a confident answer for a value nobody
+    supplied. See ml/serving_schema.py.
+    """
     expected = bundle.get("feature_columns") or metadata.get("features", [])
-    missing = [column for column in expected if column not in df.columns]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required features: {missing}")
+    result = serving_schema.check(df, expected, serving_schema.numeric_columns_from_metadata(metadata))
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.message())
     # The stored Pipelines carry their own preprocessing, so raw columns go
     # straight in — there is no separate transform step to keep in sync.
     return df[expected]
 
 
-def predict_rows(run_key: str, df: pd.DataFrame, parse_warnings: list[str] | None = None) -> dict:
-    """Load the run's model and predict on `df`.
+def predict_rows(
+    run_key: str,
+    df: pd.DataFrame,
+    parse_warnings: list[str] | None = None,
+    owner_id: str | None = None,
+) -> dict:
+    """Load the run's champion model and predict on `df`.
 
     The one path from a frame to a response, shared by the upload route and by
     the analyst's `run_model` tool — so the agent cannot end up with a second,
-    subtly different notion of what this model predicts.
+    subtly different notion of what this model predicts. It is also the one
+    place predictions are logged, for the same reason.
     """
-    metadata, bundle = _load_bundle(run_key)
+    started = time.perf_counter()
+    metadata, bundle, version = _load_bundle(run_key, owner_id=owner_id)
     X = _align_features(df, bundle, metadata)
     raw_preds, probabilities = _predict_frame(bundle, X, run_key)
-    return _build_response(run_key, metadata, bundle, X, raw_preds, probabilities, parse_warnings or [])
+    response = _build_response(run_key, metadata, bundle, X, raw_preds, probabilities, parse_warnings or [], version)
+    elapsed = time.perf_counter() - started
+
+    # After the response is built, so a monitoring problem cannot cost the
+    # caller their answer. `X` rather than `df`: what is recorded is what the
+    # model was actually given.
+    monitoring.log_prediction_batch(
+        run_key=run_key,
+        owner_id=owner_id or db.LOCAL_OWNER_ID,
+        model_version=version.get("version_id"),
+        frame=X,
+        rows=response["rows"],
+        latency_ms=int(elapsed * 1000),
+    )
+    metrics.observe_prediction("ok", elapsed)
+    return response
 
 
 @router.post("/predict/{run_key}")
@@ -174,7 +254,7 @@ async def predict(
     if df.empty:
         raise HTTPException(status_code=400, detail="Prediction CSV is empty after parsing malformed rows.")
 
-    return predict_rows(run_key, df, report.warnings)
+    return predict_rows(run_key, df, report.warnings, owner_id=owner_scope(principal) or db.LOCAL_OWNER_ID)
 
 
 @router.post("/predict/{run_key}/row")
@@ -186,15 +266,22 @@ def predict_single_row(
     """Predict one row supplied as JSON — no file upload required."""
     validate_dataset_hash(run_key)
     require_owned_run(run_key, principal)
-    metadata, bundle = _load_bundle(run_key)
+    owner_id = owner_scope(principal) or db.LOCAL_OWNER_ID
+    started = time.perf_counter()
+    metadata, bundle, version = _load_bundle(run_key, owner_id=owner_id)
 
     if not request.row:
         raise HTTPException(status_code=400, detail="No values supplied.")
 
     expected = bundle.get("feature_columns") or metadata.get("features", [])
-    missing = [column for column in expected if column not in request.row]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required features: {missing}")
+    supplied = pd.DataFrame([request.row])
+    check = serving_schema.check(supplied, expected, serving_schema.numeric_columns_from_metadata(metadata))
+    if check.missing:
+        # Type breakage is not checked here: a single row typed into a form
+        # arrives as strings by definition, and the conversion below is what
+        # turns it back into numbers. The CSV path, where a whole column can be
+        # the wrong kind, is where that check belongs.
+        raise HTTPException(status_code=400, detail=check.message())
 
     # Values arrive as strings from a form; let pandas infer real dtypes so the
     # numeric columns are not handed to the scaler as text.
@@ -205,4 +292,15 @@ def predict_single_row(
             frame[column] = converted
 
     raw_preds, probabilities = _predict_frame(bundle, frame, run_key)
-    return _build_response(run_key, metadata, bundle, frame, raw_preds, probabilities, [])
+    response = _build_response(run_key, metadata, bundle, frame, raw_preds, probabilities, [], version)
+    elapsed = time.perf_counter() - started
+    monitoring.log_prediction_batch(
+        run_key=run_key,
+        owner_id=owner_id,
+        model_version=version.get("version_id"),
+        frame=frame,
+        rows=response["rows"],
+        latency_ms=int(elapsed * 1000),
+    )
+    metrics.observe_prediction("ok", elapsed)
+    return response

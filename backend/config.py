@@ -138,6 +138,51 @@ class Settings(BaseSettings):
     # out on their own; existing keys are unaffected.
     api_key_default_ttl_days: int = Field(default=0, ge=0)
 
+    # --- Post-deployment monitoring (Phase 9) -------------------------------
+    # Every phase before this one judged a model at the moment it was trained
+    # and never looked again. These are the settings for looking again.
+    #
+    # On by default, unlike Phase 6's and Phase 8's capabilities, and the
+    # difference is deliberate: those change how the application behaves for a
+    # caller, while this only records what it already did. A model nobody is
+    # watching is the failure this phase exists to prevent, so the safe default
+    # is the one that watches. The data is owner-scoped and retention-governed
+    # exactly like the datasets it came from.
+    prediction_logging_enabled: bool = True
+    # A batch prediction on 50,000 rows should not write 50,000 rows. Above this
+    # the request is sampled and every stored row is flagged `sampled`, so a
+    # partial log is never mistaken for a complete one.
+    prediction_log_max_rows: int = Field(default=200, ge=1)
+    # Inputs are as sensitive as the training rows they resemble. Turning this
+    # off keeps the volume, latency and outcome record — which is what the
+    # monitoring view is built from — and drops the feature values, which costs
+    # drift detection entirely. Stated here because that is the whole trade.
+    prediction_log_inputs: bool = True
+
+    # How many recent predictions a drift comparison reads. Wide enough to be a
+    # distribution, bounded so the query stays cheap on a busy run.
+    drift_sample_size: int = Field(default=1000, ge=30)
+    # Below this many logged predictions the comparison is reported but never
+    # given a verdict. 200 is not a round default: comparing a reference
+    # against a fresh sample of the *identical* distribution reads as drift on
+    # essentially every trial below this row count, measured by repeated
+    # simulation in ml/drift.py and its tests. Lowering this without lowering
+    # NUMERIC_BINS to match reintroduces that false-positive rate.
+    drift_min_rows: int = Field(default=200, ge=30)
+
+    # Fit a calibrated variant of a classifier and keep it if it is measurably
+    # better. Costs a few extra fits per training run. Off leaves calibration
+    # *measured* and reported — the number is still in the metadata and still
+    # in the API — and only skips acting on it.
+    calibrate_probabilities: bool = True
+
+    # Promotion margin for a retrained challenger, as a fraction of the
+    # champion's score. A challenger that wins by less than this is not
+    # promoted: repeated retraining on a fixed dataset produces a spread of
+    # scores around the same true value, and promoting on any improvement at
+    # all means promoting noise, forever, and calling it progress.
+    challenger_promotion_margin: float = Field(default=0.01, ge=0.0)
+
     # --- Artifact integrity ------------------------------------------------
     # joblib.load() executes pickle opcodes, so loading an artifact whose bytes
     # someone else could influence is remote code execution. Every bundle is
