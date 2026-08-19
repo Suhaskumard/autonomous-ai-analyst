@@ -109,7 +109,7 @@ def upgrade() -> None:
         )
         SELECT 'v1_' || run_key, run_key, owner_id, 1, created_at, '_model.pkl',
                selected_model, NULL, NULL, row_count,
-               1, created_at, NULL, 'initial', '{}'
+               TRUE, created_at, NULL, 'initial', '{}'
         FROM runs
         WHERE run_key NOT IN (SELECT run_key FROM model_versions)
         """

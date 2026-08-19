@@ -31,10 +31,20 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# MPLCONFIGDIR and HOME point at the tmpfs the caller mounts at /tmp, not the
+# nonexistent /home/sandbox this --no-create-home user has: without them,
+# matplotlib's own fallback creates a temp cache dir and registers an atexit
+# cleanup that calls shutil.rmtree — which the runner's audit hook then blocks,
+# printing a harmless but alarming "Exception ignored in atexit callback" on
+# every run. analyst/container.py already passes these two explicitly when it
+# invokes this image for real; set here too so the image behaves the same way
+# run directly, the way this file's own docstring above tells someone to.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    MPLBACKEND=Agg
+    MPLBACKEND=Agg \
+    MPLCONFIGDIR=/tmp/mpl \
+    HOME=/tmp
 
 # Pinned to the same versions as backend/requirements.txt. They have to match:
 # an answer computed here and an answer computed by the API's own pandas must
