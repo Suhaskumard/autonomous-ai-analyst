@@ -168,24 +168,51 @@ def set_storage(storage: ArtifactStorage | None) -> None:
 ARTIFACT_SUFFIXES = (".json", "_data.csv", "_model.pkl", "_model.pkl.sig")
 
 
-def run_artifact_paths(run_key: str) -> list[tuple[str, Path]]:
-    """Every (storage key, local path) belonging to a run."""
+def run_artifact_paths(run_key: str, extra_model_suffixes: list[str] | None = None) -> list[tuple[str, Path]]:
+    """Every (storage key, local path) belonging to a run.
+
+    `extra_model_suffixes` is for retrained versions: version 1 keeps the
+    fixed `_model.pkl` name `ARTIFACT_SUFFIXES` already knows, but a
+    challenger is written under `registry.suffix_for(version)` — a name this
+    fixed tuple has never heard of. Callers that deleted a run's
+    `ModelVersionRecord` rows (`db.delete_model_versions_for_run`, which
+    returns exactly this list) pass its result straight through, or a
+    champion/challenger pair from a retraining run leaks its bundle and
+    `.sig` sidecar on every deletion path — including "erase everything",
+    which promises there is nothing left to leak.
+    """
     from utils.helpers import METADATA_DIR, MODEL_DIR
 
+    suffixes = list(ARTIFACT_SUFFIXES)
+    for suffix in extra_model_suffixes or ():
+        if suffix not in suffixes:
+            suffixes.append(suffix)
+        signature = f"{suffix}.sig"
+        if signature not in suffixes:
+            suffixes.append(signature)
+
     paths = []
-    for suffix in ARTIFACT_SUFFIXES:
+    for suffix in suffixes:
         root = Path(MODEL_DIR) if "_model.pkl" in suffix else Path(METADATA_DIR)
         paths.append((f"{run_key}{suffix}", root / f"{run_key}{suffix}"))
     return paths
 
 
-def publish_run(run_key: str) -> int:
-    """Mirror a finished run's artifacts to durable storage."""
+def publish_run(run_key: str, extra_model_suffixes: list[str] | None = None) -> int:
+    """Mirror a finished run's artifacts to durable storage.
+
+    `extra_model_suffixes` matters the moment a run has been retrained: a
+    promoted challenger is written under `registry.suffix_for(version)`, a
+    name `ARTIFACT_SUFFIXES` does not know. Publishing without it mirrors only
+    the original version-1 bundle — the promoted one never reaches the bucket,
+    so every other replica's `ensure_local` finds nothing to fetch and serves
+    a 503 forever, not just until it "syncs".
+    """
     storage = get_storage()
     if isinstance(storage, LocalStorage):
         return 0
     published = 0
-    for key, path in run_artifact_paths(run_key):
+    for key, path in run_artifact_paths(run_key, extra_model_suffixes):
         if path.exists():
             try:
                 storage.put(path, key)
@@ -195,21 +222,36 @@ def publish_run(run_key: str) -> int:
     return published
 
 
-def ensure_local(run_key: str) -> None:
-    """Pull a run's artifacts down if this machine does not have them."""
+def ensure_local(run_key: str, extra_model_suffixes: list[str] | None = None) -> None:
+    """Pull a run's artifacts down if this machine does not have them.
+
+    Same reasoning as `publish_run`'s `extra_model_suffixes`: a caller that
+    knows which version it is about to load — `predict._load_bundle` does,
+    from the registry — has to ask for that version's files specifically, or a
+    replica that only ever pulled the default suffixes never sees a promoted
+    challenger's bundle at all.
+    """
     storage = get_storage()
     if isinstance(storage, LocalStorage):
         return
-    for key, path in run_artifact_paths(run_key):
+    for key, path in run_artifact_paths(run_key, extra_model_suffixes):
         if not path.exists():
             storage.get(key, path)
 
 
-def purge_run(run_key: str) -> int:
-    """Delete a run's artifacts locally and remotely. Returns files removed."""
+def purge_run(run_key: str, extra_model_suffixes: list[str] | None = None) -> int:
+    """Delete a run's artifacts locally and remotely. Returns files removed.
+
+    `extra_model_suffixes` is how a caller that already deleted a run's
+    `ModelVersionRecord` rows passes along what `db.delete_model_versions_
+    for_run` returned — every version's bundle, not just the one name this
+    function would otherwise know to look for. Skipping it is how "delete my
+    account's data" leaves a retrained model's bundle on disk and in the
+    bucket after telling the caller everything was erased.
+    """
     storage = get_storage()
     removed = 0
-    for key, path in run_artifact_paths(run_key):
+    for key, path in run_artifact_paths(run_key, extra_model_suffixes):
         if path.exists():
             try:
                 path.unlink()

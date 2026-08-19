@@ -392,6 +392,42 @@ of it.
 
 ---
 
+## 🔗 Sharing, Export, and Scheduled Reports
+
+Product work, not remediation — nothing here closes a gap the way Phases 7–9 did. Ownership from
+Phase 6 and the audit log from Phase 8 are what make each of these safe to add at all.
+
+- **Read-only share links** (opt-in, `SHARE_LINKS_ENABLED`): a token that grants exactly one thing —
+  the same dashboard payload `GET /runs/{run_key}/result` already returns — to whoever holds it, no
+  account required. Never chat, prediction, or report generation, because those cost LLM money or
+  compute per call and a link is meant to be handed to someone this application has no way to bill or
+  rate-limit. Every link expires (`SHARE_LINK_DEFAULT_TTL_DAYS`, capped by `SHARE_LINK_MAX_TTL_DAYS`)
+  and can be revoked; `POST /api/runs/{run_key}/share` mints one, `DELETE /api/share/{token}` revokes
+  it, `GET /api/share/{token}` is the unauthenticated read.
+- **Scheduled reports** (opt-in, `SCHEDULED_REPORTS_ENABLED`, refuses without `SMTP_HOST`): the Phase
+  5 report generator, regenerated and emailed on a daily or weekly cadence. No in-process scheduler —
+  the same reasoning as retention's purge — `next_run_at` is a due date, and `POST
+  /api/report-schedules/run-due` is what an operator's cron entry calls to act on it. Each due
+  schedule is handed to the Phase 6 queue rather than run inline, so one slow LLM call cannot make a
+  cron tick time out, and a failure of any kind still advances `next_run_at` rather than retrying in a
+  tight loop.
+- **Export a trained pipeline**, so a model can leave the app it was trained in. A portable bundle
+  (`?format=bundle`, always available) zips the signed pickle, a standalone `score.py`, and pinned
+  requirements. ONNX (`?format=onnx`) is offered when the run's pipeline allows it — sklearn's
+  `TargetEncoder` and `HistGradientBoosting*` have no ONNX converter, and a categorical column trips a
+  `SimpleImputer` limitation in `skl2onnx`, so those refuse with a specific reason rather than silently
+  producing a graph that scores differently from the model it claims to be.
+  `GET /api/runs/{run_key}/export/availability` says which formats apply before a caller downloads one.
+- **A split frontend bundle**: `recharts` — most of the single 743 kB chunk the build had been warning
+  about — now loads lazily behind the dashboard rather than in the initial page load, which dropped to
+  roughly 155 kB. The per-column profile shown before a model exists uses a small hand-drawn SVG
+  sparkline instead, the one chart that has to render before that lazy chunk would ever be requested.
+
+Deletion reaches all of it: removing a run or an account also revokes its share links and cancels its
+report schedules, the same way it already removes predictions and model versions.
+
+---
+
 ## 🔐 Security Posture
 
 - **Path safety**: every artifact key (`run_key`) from a client is validated against `^[a-f0-9]{64}$` and resolved under a known storage root before it is used to load an artifact, so a crafted value cannot reach `joblib.load` on an arbitrary file.

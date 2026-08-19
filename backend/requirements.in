@@ -37,3 +37,13 @@ sentry-sdk
 # SQLite in that same configuration; it is unused on the SQLite default.
 alembic
 psycopg[binary]
+
+# Phase 10: exporting a trained pipeline. skl2onnx converts the sklearn half
+# (ColumnTransformer, OneHotEncoder, StandardScaler, the built-in estimators);
+# onnxmltools registers converters for XGBoost/LightGBM on top of it. Neither
+# covers sklearn's TargetEncoder or HistGradientBoosting*, which ml/export.py
+# detects and refuses rather than silently producing a wrong bundle — see its
+# module docstring. ml/export.py imports both behind a try/except, the same
+# optional-dependency shape as xgboost/lightgbm in train.py.
+skl2onnx
+onnxmltools

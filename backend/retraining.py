@@ -133,7 +133,14 @@ def retrain(
         # published after promotion is briefly missing on a replica that has
         # not synced — which `predict._load_bundle` answers with a 503 rather
         # than by quietly serving the old model under the new version's name.
-        published = publish_run(run_key)
+        #
+        # `record["artifact_suffix"]` has to be passed explicitly. Version 1
+        # is always `_model.pkl`, which `ARTIFACT_SUFFIXES` already knows about
+        # — a retrained version is not, and publishing without naming it here
+        # mirrors only the stale version-1 bundle. Every other replica's
+        # `ensure_local` would then find nothing new to fetch, and the 503
+        # above would never clear: not "briefly missing", but missing forever.
+        published = publish_run(run_key, [record["artifact_suffix"]])
         logger.info("Challenger published", extra={"run_key": run_key, "files": published})
 
     _record_history(run_key, comparison, version_number, trigger)

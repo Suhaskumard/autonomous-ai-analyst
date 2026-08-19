@@ -134,11 +134,18 @@ def delete_run(run_key: str, principal: Principal = Depends(current_principal)):
     # Predictions and model versions are about this run and have no meaning
     # without it — same reasoning as conversations, one line up.
     predictions_removed = db.delete_predictions_for_run(run_key)
-    db.delete_model_versions_for_run(run_key)
+    # The suffixes a retrained run's later versions were written under —
+    # `_model.pkl` alone only covers version 1. Passed through to purge_run so
+    # a promoted challenger's bundle does not outlive the row that named it.
+    extra_model_suffixes = db.delete_model_versions_for_run(run_key)
     # Removes the metadata, the snapshot, the model and its signature, locally
     # and from object storage — a delete that left the bucket copy behind would
     # be a deletion endpoint that does not delete.
-    removed = purge_run(run_key)
+    removed = purge_run(run_key, extra_model_suffixes)
+    # A share link outlives nothing about the run it points at, and neither
+    # does a standing report schedule.
+    db.delete_share_links_for_run(run_key)
+    db.delete_report_schedules_for_run(run_key)
     if not existed and removed == 0:
         raise HTTPException(status_code=404, detail="No run found for this key.")
     logger.info(

@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import JSON, Column, delete, text
+from sqlalchemy import JSON, Column, delete, func, text
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from config import settings
@@ -382,6 +382,88 @@ class ModelVersionRecord(SQLModel, table=True):
         }
 
 
+class ShareLinkRecord(SQLModel, table=True):
+    """A read-only, expiring window onto one run's result — Phase 10.
+
+    The token is the credential: unauthenticated, unlogged elsewhere, and
+    unrecoverable once shown, the same shape as an API key. It grants exactly
+    one capability — read `GET /runs/{run_key}/result` — never chat, never
+    prediction, never report generation, because those cost LLM money and a
+    link is meant to be handed to someone who is not a caller this application
+    knows how to bill. Expiry is mandatory, not optional like a run's
+    retention: a link with no expiry is a permanent, unauthenticated door onto
+    private data that outlives the reason it was created.
+    """
+
+    __tablename__ = "share_links"
+
+    token: str = Field(primary_key=True)
+    run_key: str = Field(index=True)
+    owner_id: str = Field(default=LOCAL_OWNER_ID, index=True)
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    expires_at: datetime = Field(index=True)
+    revoked_at: datetime | None = Field(default=None, index=True)
+
+    def is_active(self, moment: datetime | None = None) -> bool:
+        if self.revoked_at is not None:
+            return False
+        expires = as_utc(self.expires_at)
+        return expires is None or expires > (moment or now_utc())
+
+    def to_public(self) -> dict[str, Any]:
+        """Everything about a link except the token itself — that is only
+        ever returned once, at creation, the same rule as an API key."""
+        return {
+            "run_key": self.run_key,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
+        }
+
+
+class ReportScheduleRecord(SQLModel, table=True):
+    """A standing instruction to regenerate a run's report and email it — Phase 10.
+
+    No in-process scheduler runs this; Phase 6's own lifespan comment already
+    settled that question for retention ("an operator who wants it hourly can
+    curl the admin endpoint from cron"), and a schedule here follows the same
+    shape — `next_run_at` is a due date this row makes visible, and
+    `POST /api/report-schedules/run-due` is what an external cron calls to act
+    on it. The queue from Phase 6 is what actually runs the job once it is
+    due, so scheduling adds no new execution path, only a due date and a
+    recipient.
+    """
+
+    __tablename__ = "report_schedules"
+
+    schedule_id: str = Field(primary_key=True)
+    run_key: str = Field(index=True)
+    owner_id: str = Field(default=LOCAL_OWNER_ID, index=True)
+    #: Comma-separated recipient addresses, validated at creation.
+    recipients: str
+    #: "daily" | "weekly" — the only two cadences offered, so "next due date"
+    #: is arithmetic rather than a cron expression this app has to parse.
+    interval: str = "weekly"
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    next_run_at: datetime = Field(index=True)
+    last_run_at: datetime | None = None
+    last_status: str | None = None
+    active: bool = Field(default=True, index=True)
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "schedule_id": self.schedule_id,
+            "run_key": self.run_key,
+            "recipients": self.recipients.split(","),
+            "interval": self.interval,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "next_run_at": self.next_run_at.isoformat() if self.next_run_at else None,
+            "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
+            "last_status": self.last_status,
+            "active": self.active,
+        }
+
+
 _engine = None
 
 
@@ -661,6 +743,130 @@ def run_owner(run_key: str) -> str | None:
     with session_scope() as session:
         row = session.get(RunRecord, run_key)
         return row.owner_id if row else None
+
+
+# --- share links (Phase 10) --------------------------------------------------
+
+
+def add_share_link(token: str, run_key: str, owner_id: str, expires_at: datetime) -> dict[str, Any]:
+    with session_scope() as session:
+        record = ShareLinkRecord(token=token, run_key=run_key, owner_id=owner_id, expires_at=expires_at)
+        session.add(record)
+        session.flush()
+        return record.to_public()
+
+
+def get_share_link(token: str) -> dict[str, Any] | None:
+    """A link row by its token, whatever its state. The caller decides validity."""
+    with session_scope() as session:
+        row = session.get(ShareLinkRecord, token)
+        if row is None:
+            return None
+        return {**row.to_public(), "owner_id": row.owner_id, "active": row.is_active()}
+
+
+def list_share_links(run_key: str, owner_id: str | None = None) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        query = select(ShareLinkRecord).where(ShareLinkRecord.run_key == run_key)
+        if owner_id is not None:
+            query = query.where(ShareLinkRecord.owner_id == owner_id)
+        rows = session.exec(query.order_by(ShareLinkRecord.created_at.desc())).all()
+        return [row.to_public() for row in rows]
+
+
+def revoke_share_link(token: str, owner_id: str | None = None) -> bool:
+    """Revoke one link. False when it does not exist or is not this owner's."""
+    with session_scope() as session:
+        row = session.get(ShareLinkRecord, token)
+        if row is None or (owner_id is not None and row.owner_id != owner_id):
+            return False
+        if row.revoked_at is None:
+            row.revoked_at = now_utc()
+            session.add(row)
+        return True
+
+
+def delete_share_links_for_run(run_key: str) -> int:
+    """Deleting a dataset takes its share links with it."""
+    with session_scope() as session:
+        result = session.exec(delete(ShareLinkRecord).where(ShareLinkRecord.run_key == run_key))
+        return int(getattr(result, "rowcount", 0) or 0)
+
+
+# --- report schedules (Phase 10) ---------------------------------------------
+
+
+def add_report_schedule(
+    schedule_id: str, run_key: str, owner_id: str, recipients: str, interval: str, next_run_at: datetime
+) -> dict[str, Any]:
+    with session_scope() as session:
+        record = ReportScheduleRecord(
+            schedule_id=schedule_id,
+            run_key=run_key,
+            owner_id=owner_id,
+            recipients=recipients,
+            interval=interval,
+            next_run_at=next_run_at,
+        )
+        session.add(record)
+        session.flush()
+        return record.to_public()
+
+
+def get_report_schedule(schedule_id: str) -> dict[str, Any] | None:
+    with session_scope() as session:
+        row = session.get(ReportScheduleRecord, schedule_id)
+        return row.to_public() if row else None
+
+
+def list_report_schedules(run_key: str | None = None, owner_id: str | None = None) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        query = select(ReportScheduleRecord)
+        if run_key is not None:
+            query = query.where(ReportScheduleRecord.run_key == run_key)
+        if owner_id is not None:
+            query = query.where(ReportScheduleRecord.owner_id == owner_id)
+        rows = session.exec(query.order_by(ReportScheduleRecord.created_at.desc())).all()
+        return [row.to_public() for row in rows]
+
+
+def due_report_schedules(moment: datetime | None = None) -> list[dict[str, Any]]:
+    """Every active schedule whose `next_run_at` has passed. What cron reads."""
+    cutoff = moment or now_utc()
+    with session_scope() as session:
+        query = select(ReportScheduleRecord).where(
+            ReportScheduleRecord.active == True,  # noqa: E712 - SQLAlchemy needs `== True`, not `is True`
+            ReportScheduleRecord.next_run_at <= cutoff,
+        )
+        rows = session.exec(query).all()
+        return [{**row.to_public(), "run_key": row.run_key} for row in rows]
+
+
+def record_report_schedule_run(schedule_id: str, next_run_at: datetime, status: str) -> None:
+    with session_scope() as session:
+        row = session.get(ReportScheduleRecord, schedule_id)
+        if row is None:
+            return
+        row.last_run_at = now_utc()
+        row.last_status = status
+        row.next_run_at = next_run_at
+        session.add(row)
+
+
+def delete_report_schedule(schedule_id: str, owner_id: str | None = None) -> bool:
+    with session_scope() as session:
+        row = session.get(ReportScheduleRecord, schedule_id)
+        if row is None or (owner_id is not None and row.owner_id != owner_id):
+            return False
+        session.delete(row)
+        return True
+
+
+def delete_report_schedules_for_run(run_key: str) -> int:
+    """Deleting a dataset takes its report schedules with it."""
+    with session_scope() as session:
+        result = session.exec(delete(ReportScheduleRecord).where(ReportScheduleRecord.run_key == run_key))
+        return int(getattr(result, "rowcount", 0) or 0)
 
 
 # --- users ------------------------------------------------------------------
@@ -954,7 +1160,14 @@ def prediction_stats(run_key: str, owner_id: str | None = None, since: datetime 
         if not rows:
             return {"count": 0, "first_at": None, "last_at": None, "latency_ms": {}, "per_day": [], "versions": {}}
 
-        latencies = sorted(row.latency_ms for row in rows if row.latency_ms)
+        # `is not None`, not truthiness: `latency_ms` is a non-nullable int
+        # defaulting to 0, and `predict.py` writes `int(elapsed * 1000)`, which
+        # truncates any sub-millisecond call to exactly 0 — a real measurement,
+        # not a missing one. A bare `if row.latency_ms` drops those rows from
+        # the percentiles while `count` above still includes them, so the two
+        # numbers would describe different populations and the fast tail would
+        # vanish from exactly the report meant to show it off.
+        latencies = sorted(row.latency_ms for row in rows if row.latency_ms is not None)
         timestamps = sorted(row.created_at for row in rows if row.created_at)
 
         per_day: dict[str, int] = {}
@@ -998,11 +1211,19 @@ def delete_predictions_for_run(run_key: str) -> int:
 
 
 def count_predictions(owner_id: str | None = None) -> int:
+    """A scalar `COUNT(*)`, not every row pulled across the wire to len() them.
+
+    The predictions table is the one place in this file where that distinction
+    matters: it grows one row per served prediction — tens of thousands a day
+    on a busy run — and every row carries the `inputs` JSON blob. `select
+    (PredictionRecord)` would hydrate and JSON-decode all of it just to throw
+    it away for an integer.
+    """
     with session_scope() as session:
-        query = select(PredictionRecord)
+        query = select(func.count()).select_from(PredictionRecord)
         if owner_id is not None:
             query = query.where(PredictionRecord.owner_id == owner_id)
-        return len(session.exec(query).all())
+        return int(session.exec(query).one())
 
 
 # --- model versions (Phase 9) ------------------------------------------------
@@ -1079,7 +1300,13 @@ def promote_model_version(version_id: str, notes: dict[str, Any] | None = None) 
             target.notes = {**(target.notes or {}), **notes}
         session.add(target)
         session.flush()
-        return target.to_public()
+        # `to_public()` deliberately omits `artifact_suffix` — an internal
+        # storage detail, not something an API response needs. But
+        # registry.register_challenger() returns this dict straight to
+        # retraining.py, which needs exactly that suffix to publish the
+        # newly-promoted bundle to object storage; the same addition
+        # `champion_version()` makes for the same reason.
+        return {**target.to_public(), "artifact_suffix": target.artifact_suffix}
 
 
 def delete_model_versions_for_run(run_key: str) -> list[str]:
@@ -1313,6 +1540,8 @@ __all__ = [
     "PredictionRecord",
     "AuditRecord",
     "ConversationRecord",
+    "ShareLinkRecord",
+    "ReportScheduleRecord",
     "add_api_key",
     "add_model_version",
     "append_audit",
@@ -1337,6 +1566,18 @@ __all__ = [
     "revoke_api_key",
     "spend_since",
     "touch_api_key",
+    "add_share_link",
+    "get_share_link",
+    "list_share_links",
+    "revoke_share_link",
+    "delete_share_links_for_run",
+    "add_report_schedule",
+    "get_report_schedule",
+    "list_report_schedules",
+    "due_report_schedules",
+    "record_report_schedule_run",
+    "delete_report_schedule",
+    "delete_report_schedules_for_run",
     "UsageRecord",
     "UserRecord",
     "count_users",

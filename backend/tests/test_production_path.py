@@ -537,6 +537,63 @@ def test_a_replica_with_an_empty_disk_serves_a_prediction(client, fixture_csv, i
     assert client.get(f"/api/runs/{run_key}").status_code == 200
 
 
+def test_a_replica_serves_a_promoted_challenger_it_never_trained(
+    client, fixture_csv, isolated_storage, tmp_path, monkeypatch
+):
+    """Phase 9's champion/challenger versioning has to survive Phase 7's
+    replica scenario too: a promoted challenger is written under
+    `registry.suffix_for(version)`, a name the default artifact suffix list
+    (`ARTIFACT_SUFFIXES`) has never heard of. `_load_bundle` has to resolve
+    which version is champion *before* asking object storage to fetch it, or
+    a replica with an empty disk asks for v1's file, finds v2 registered,
+    and 503s permanently instead of "briefly, until it syncs".
+    """
+    import registry
+
+    bucket = _DirectoryStorage(tmp_path / "bucket")
+    storage_module.set_storage(bucket)
+
+    job = upload_and_wait(client, fixture_csv(CLASSIFICATION))
+    assert job["state"] == "completed"
+    run_key = job["result"]["run_key"]
+
+    monkeypatch.setattr(
+        registry,
+        "better",
+        lambda *args, **kwargs: {
+            "promote": True,
+            "metric": "f1_macro",
+            "challenger": 0.9,
+            "champion": 0.5,
+            "reason": "forced promotion for the test",
+        },
+    )
+    with fixture_csv(CLASSIFICATION).open("rb") as handle:
+        retrain_response = client.post(
+            f"/api/runs/{run_key}/retrain", files={"file": ("newer.csv", handle, "text/csv")}
+        )
+    assert retrain_response.status_code == 200, retrain_response.text
+    challenger = retrain_response.json()["challenger"]
+    assert challenger["version"] == 2
+
+    # What the champion's own suffix is now — the file the replica has to be
+    # able to find without ever having trained it.
+    v2_suffix = registry.suffix_for(2)
+    assert f"{run_key}{v2_suffix}" in {key for key, _ in storage_module.run_artifact_paths(run_key, [v2_suffix])}
+    assert (tmp_path / "bucket" / f"{run_key}{v2_suffix}").exists(), "the promoted bundle never reached the bucket"
+
+    # The replica: same bucket, same database, nothing on disk — including v2.
+    for _, path in storage_module.run_artifact_paths(run_key, [v2_suffix]):
+        if path.exists():
+            path.unlink()
+
+    row = dict.fromkeys(job["result"]["features"], 1)
+    response = client.post(f"/api/predict/{run_key}/row", json={"row": row})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["model_version"] == challenger["version_id"]
+
+
 @pytest.mark.skipif(
     not os.getenv("MINIO_TEST_ENDPOINT"),
     reason="set MINIO_TEST_ENDPOINT (docker compose --profile storage up) to run against a real bucket",

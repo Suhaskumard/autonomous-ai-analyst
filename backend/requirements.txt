@@ -88,6 +88,8 @@ mako==1.4.1
     # via alembic
 markupsafe==3.0.3
     # via mako
+ml-dtypes==0.6.0
+    # via onnx
 narwhals==2.24.0
     # via
     #   lightgbm
@@ -99,12 +101,21 @@ numpy==2.5.2
     #   -r backend/requirements.in
     #   imbalanced-learn
     #   lightgbm
+    #   ml-dtypes
     #   numba
+    #   onnx
+    #   onnxmltools
     #   pandas
     #   scikit-learn
     #   scipy
     #   shap
     #   xgboost
+onnx==1.22.0
+    # via
+    #   onnxmltools
+    #   skl2onnx
+onnxmltools==1.16.0
+    # via -r backend/requirements.in
 packaging==26.3
     # via shap
 pandas==3.0.5
@@ -113,6 +124,10 @@ pandas==3.0.5
     #   shap
 prometheus-client==0.26.0
     # via -r backend/requirements.in
+protobuf==7.35.1
+    # via
+    #   onnx
+    #   onnxmltools
 psycopg==3.3.4
     # via -r backend/requirements.in
 psycopg-binary==3.3.4
@@ -164,6 +179,7 @@ scikit-learn==1.9.0
     #   -r backend/requirements.in
     #   imbalanced-learn
     #   shap
+    #   skl2onnx
     #   sklearn-compat
 scipy==1.18.0
     # via
@@ -179,6 +195,10 @@ shap==0.52.0
     # via -r backend/requirements.in
 six==1.17.0
     # via python-dateutil
+skl2onnx==1.20.0
+    # via
+    #   -r backend/requirements.in
+    #   onnxmltools
 sklearn-compat==0.1.6
     # via imbalanced-learn
 slicer==0.0.8
@@ -206,6 +226,7 @@ typing-extensions==4.16.0
     #   alembic
     #   fastapi
     #   google-genai
+    #   onnx
     #   pydantic
     #   pydantic-core
     #   sqlalchemy

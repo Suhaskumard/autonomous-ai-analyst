@@ -143,6 +143,60 @@ export async function deleteRun(runKey, { signal } = {}) {
   return request(`/runs/${runKey}`, { method: "DELETE", signal });
 }
 
+// --- sharing, export, and scheduled reports (Phase 10) ----------------------
+
+export async function createShareLink(runKey, ttlDays, { signal } = {}) {
+  const query = ttlDays ? `?ttl_days=${ttlDays}` : "";
+  return request(`/runs/${runKey}/share${query}`, { method: "POST", signal });
+}
+
+export async function listShareLinks(runKey, { signal } = {}) {
+  return request(`/runs/${runKey}/share`, { signal });
+}
+
+export async function revokeShareLink(token, { signal } = {}) {
+  return request(`/share/${token}`, { method: "DELETE", signal });
+}
+
+// The one unauthenticated call in this file: the token *is* the credential,
+// so it deliberately does not go through `withAuth` — a viewer holding a link
+// has no API key to attach.
+export async function getSharedRun(token, { signal } = {}) {
+  return unwrap(await fetch(`${API_BASE}/share/${token}`, { signal }));
+}
+
+export async function getExportAvailability(runKey, { signal } = {}) {
+  return request(`/runs/${runKey}/export/availability`, { signal });
+}
+
+// Returns a Blob rather than JSON — the caller saves it, and `request`'s
+// res.json() would choke on a zip.
+export async function downloadExport(runKey, format, { signal } = {}) {
+  const res = await fetch(`${API_BASE}/runs/${runKey}/export?format=${format}`, {
+    headers: withAuth(),
+    signal,
+  });
+  if (!res.ok) return unwrap(res);
+  return res.blob();
+}
+
+export async function createReportSchedule(runKey, recipients, interval, { signal } = {}) {
+  return request(`/runs/${runKey}/report-schedules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ recipients, interval }),
+    signal,
+  });
+}
+
+export async function listReportSchedules(runKey, { signal } = {}) {
+  return request(`/runs/${runKey}/report-schedules`, { signal });
+}
+
+export async function deleteReportSchedule(scheduleId, { signal } = {}) {
+  return request(`/report-schedules/${scheduleId}`, { method: "DELETE", signal });
+}
+
 // --- account, usage, and data lifecycle (Phase 6) ---------------------------
 
 export async function whoAmI({ signal } = {}) {

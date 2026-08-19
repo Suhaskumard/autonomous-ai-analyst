@@ -55,12 +55,18 @@ def _load_bundle(run_key: str, owner_id: str | None = None) -> tuple[dict, dict,
     validate_dataset_hash(run_key)
     metadata_path = artifact_path(METADATA_DIR, run_key, ".json")
 
+    version = registry.resolve(run_key, owner_id=owner_id)
+
     # With object storage the run may have been trained by a different web
     # process that this one shares no disk with, so "missing" is only true
-    # after the bucket has been asked. A no-op on the local backend.
-    ensure_local(run_key)
+    # after the bucket has been asked. A no-op on the local backend. Resolved
+    # *before* this call and passed through: a promoted challenger's bundle
+    # lives under `version["artifact_suffix"]`, a name the default suffix list
+    # does not know, so asking before resolving the version would only ever
+    # fetch v1 and leave a replica serving a champion v2 stuck on the 503
+    # below forever, not just until it "syncs".
+    ensure_local(run_key, [version["artifact_suffix"]])
 
-    version = registry.resolve(run_key, owner_id=owner_id)
     model_path = registry.model_path_for(run_key, version["artifact_suffix"])
     if version["versioned"] and not model_path.exists():
         # The registry names a bundle that is not on this disk. Falling back to

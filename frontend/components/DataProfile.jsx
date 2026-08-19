@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { AlertTriangle, Ban, ChevronRight, Crosshair, Database, Hash, Loader2, Type } from "lucide-react";
 
-import { Sparkline } from "./charts/DistributionCharts";
+import { Sparkline } from "./charts/Sparkline";
 import { formatNumber } from "./charts/theme";
 
 /**

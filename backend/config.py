@@ -183,6 +183,34 @@ class Settings(BaseSettings):
     # all means promoting noise, forever, and calling it progress.
     challenger_promotion_margin: float = Field(default=0.01, ge=0.0)
 
+    # --- Sharing (Phase 10) -------------------------------------------------
+    # Off by default, like every Phase 6/8 capability that changes what an
+    # unauthenticated caller may reach: a share link is a bearer credential
+    # that needs no account, so turning this on is a decision an operator
+    # makes, not a default this application makes for them.
+    share_links_enabled: bool = False
+    share_link_default_ttl_days: int = Field(default=7, gt=0)
+    # A ceiling on what a creator may ask for, independent of the default —
+    # "expiring" has to mean something even when a caller requests a year.
+    share_link_max_ttl_days: int = Field(default=30, gt=0)
+
+    # --- Scheduled reports (Phase 10) ---------------------------------------
+    # Reuses Phase 6's queue to build the report; nothing here runs a
+    # scheduler in-process, for the same reason startup retention does not
+    # (main.py's lifespan). `POST /api/report-schedules/run-due` is what an
+    # operator's cron entry calls.
+    scheduled_reports_enabled: bool = False
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, gt=0)
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    smtp_from_address: str | None = None
+    # A ceiling on how many rows delivering all due reports may process at
+    # once, so one cron tick cannot be made to run an unbounded amount of
+    # LLM-backed report generation by simply creating enough schedules.
+    report_schedule_max_due_per_run: int = Field(default=25, ge=1)
+
     # --- Artifact integrity ------------------------------------------------
     # joblib.load() executes pickle opcodes, so loading an artifact whose bytes
     # someone else could influence is remote code execution. Every bundle is
@@ -272,6 +300,7 @@ _FILE_BACKED_SECRETS = (
     "artifact_signing_key",
     "auth_bootstrap_token",
     "database_url",
+    "smtp_password",
 )
 
 

@@ -19,11 +19,14 @@ from logging_config import configure_logging, request_id_var
 from observability import CONTENT_TYPE_LATEST, init_sentry, metrics, normalise_path
 from routes.admin import router as admin_router
 from routes.chat import router as chat_router
+from routes.export import router as export_router
 from routes.insights import router as insights_router
 from routes.monitoring import router as monitoring_router
 from routes.predict import router as predict_router
 from routes.profile import router as profile_router
+from routes.report_schedules import router as report_schedules_router
 from routes.runs import router as runs_router
+from routes.share import router as share_router
 from routes.upload import router as upload_router
 from utils.artifacts import signing_status
 from utils.helpers import ensure_storage_dirs
@@ -81,6 +84,8 @@ async def lifespan(app: FastAPI):
             "storage": get_storage().name,
             "artifact_signing_key": artifacts["signing_key"],
             "retention_days": settings.retention_days,
+            "share_links": settings.share_links_enabled,
+            "scheduled_reports": settings.scheduled_reports_enabled,
         },
     )
     yield
@@ -142,6 +147,9 @@ app.include_router(chat_router, prefix="/api", tags=["chat"])
 app.include_router(runs_router, prefix="/api", tags=["runs"])
 app.include_router(admin_router, prefix="/api", tags=["admin"])
 app.include_router(monitoring_router, prefix="/api", tags=["monitoring"])
+app.include_router(share_router, prefix="/api", tags=["share"])
+app.include_router(export_router, prefix="/api", tags=["export"])
+app.include_router(report_schedules_router, prefix="/api", tags=["report-schedules"])
 
 
 @app.get("/")

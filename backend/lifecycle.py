@@ -58,14 +58,21 @@ def purge_expired(actor=None) -> dict:
     artifacts = conversations = predictions = 0
     for entry in expired:
         run_key = entry["run_key"]
-        artifacts += purge_run(run_key)
         conversations += db.delete_conversations_for_run(run_key)
         # Prediction inputs are as sensitive as the training rows they resemble,
         # so they expire with the run rather than outliving it. The audit log is
         # the deliberate exception in the other direction: it has to survive the
         # thing it records, and this describes a model that will not.
         predictions += db.delete_predictions_for_run(run_key)
-        db.delete_model_versions_for_run(run_key)
+        # Read before purge_run, not after: this is what names a retrained
+        # run's later bundles, which live under a suffix purge_run does not
+        # know on its own.
+        extra_model_suffixes = db.delete_model_versions_for_run(run_key)
+        artifacts += purge_run(run_key, extra_model_suffixes)
+        # A share link or a report schedule naming an expired run is a door
+        # standing open onto data that no longer exists to answer through it.
+        db.delete_share_links_for_run(run_key)
+        db.delete_report_schedules_for_run(run_key)
         db.delete_run(run_key)
         logger.info("Purged expired run", extra={"run_key": run_key, "owner": entry["owner_id"]})
 
@@ -97,14 +104,19 @@ def delete_everything_for(owner_id: str) -> dict:
     artifacts = conversations = predictions = 0
     for run in runs:
         run_key = run["run_key"]
-        artifacts += purge_run(run_key)
         conversations += db.delete_conversations_for_run(run_key)
         # "Delete my data" has to mean the predictions too. They hold feature
         # values this account supplied, which is the same kind of data as the
         # dataset it uploaded and is not made less personal by having been sent
         # one row at a time.
         predictions += db.delete_predictions_for_run(run_key)
-        db.delete_model_versions_for_run(run_key)
+        # Read before purge_run: a retrained run's promoted bundle lives under
+        # a suffix purge_run has no way to know without being told, and
+        # "erase everything" has to actually mean everything.
+        extra_model_suffixes = db.delete_model_versions_for_run(run_key)
+        artifacts += purge_run(run_key, extra_model_suffixes)
+        db.delete_share_links_for_run(run_key)
+        db.delete_report_schedules_for_run(run_key)
         db.delete_run(run_key, owner_id=owner_id)
 
     summary = {

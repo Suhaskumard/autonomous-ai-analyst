@@ -1,15 +1,5 @@
 import React from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  LabelList,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import ChartFrame, { EmptyChart } from "./ChartFrame";
 import { AXIS_PROPS, BAR_RADIUS, BAR_RADIUS_HORIZONTAL, GRID_PROPS, INK, PRIMARY, TOOLTIP_STYLE, formatNumber } from "./theme";
@@ -136,28 +126,6 @@ export function FeatureImportanceChart({ data, method }) {
         </ResponsiveContainer>
       )}
     </ChartFrame>
-  );
-}
-
-/** A compact inline distribution for the per-column profile table. */
-export function Sparkline({ sparkline }) {
-  const counts = sparkline?.counts || [];
-  if (counts.length === 0) return <span style={{ color: INK.muted, fontSize: "0.75rem" }}>—</span>;
-  const max = Math.max(...counts) || 1;
-  const rows = counts.map((count, index) => ({ index, count }));
-
-  return (
-    <div style={{ width: 110, height: 28 }} aria-hidden="true">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={rows} margin={{ top: 2, right: 0, bottom: 0, left: 0 }} barCategoryGap={1}>
-          <Bar dataKey="count" radius={[2, 2, 0, 0]}>
-            {rows.map((row) => (
-              <Cell key={row.index} fill={PRIMARY} fillOpacity={0.35 + 0.65 * (row.count / max)} />
-            ))}
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
   );
 }
 

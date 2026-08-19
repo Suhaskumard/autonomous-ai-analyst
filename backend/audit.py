@@ -49,6 +49,13 @@ QUOTA_REFUSED = "quota.refused"
 #: six months later, and a log that only holds successes cannot show restraint.
 MODEL_PROMOTED = "model.promoted"
 MODEL_CHALLENGED = "model.challenged"
+#: Phase 10. Creating a link opens an unauthenticated door onto a run's
+#: result; revoking closes it. Both are the kind of action "who did this and
+#: when" has to be able to answer, the same reasoning as an API key.
+SHARE_LINK_CREATED = "share_link.created"
+SHARE_LINK_REVOKED = "share_link.revoked"
+REPORT_SCHEDULE_CREATED = "report_schedule.created"
+REPORT_SCHEDULE_DELETED = "report_schedule.deleted"
 
 #: Actions a non-admin may see about themselves. Everything else is admin-only,
 #: because "which admin deactivated whom" is not an account holder's business.
@@ -61,6 +68,10 @@ SELF_VISIBLE = frozenset(
         QUOTA_REFUSED,
         MODEL_PROMOTED,
         MODEL_CHALLENGED,
+        SHARE_LINK_CREATED,
+        SHARE_LINK_REVOKED,
+        REPORT_SCHEDULE_CREATED,
+        REPORT_SCHEDULE_DELETED,
     }
 )
 

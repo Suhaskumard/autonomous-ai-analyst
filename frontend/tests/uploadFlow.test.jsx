@@ -27,6 +27,19 @@ vi.mock("../services/api", () => ({
   getApiKey: vi.fn(() => ""),
   setApiKey: vi.fn(),
   clearApiKey: vi.fn(),
+  // Phase 10. Resolved rather than bare vi.fn(): RunActions calls all three on
+  // mount, and an undefined return would put the panel into its error boundary
+  // instead of rendering it.
+  listShareLinks: vi.fn(() => Promise.resolve({ links: [] })),
+  createShareLink: vi.fn(),
+  revokeShareLink: vi.fn(),
+  getExportAvailability: vi.fn(() =>
+    Promise.resolve({ bundle: { available: true, reason: null }, onnx: { available: false, reason: "test" } })
+  ),
+  downloadExport: vi.fn(),
+  listReportSchedules: vi.fn(() => Promise.resolve({ schedules: [] })),
+  createReportSchedule: vi.fn(),
+  deleteReportSchedule: vi.fn(),
   UnauthorizedError: class UnauthorizedError extends Error {},
 }));
 

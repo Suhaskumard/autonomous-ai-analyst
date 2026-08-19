@@ -1,16 +1,36 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, Cpu, Loader2, Upload, X } from "lucide-react";
 
 import AccountBar from "../components/AccountBar";
-import ChatBox from "../components/ChatBox";
-import Dashboard from "../components/Dashboard";
 import DataProfile from "../components/DataProfile";
 import ErrorBoundary from "../components/ErrorBoundary";
-import PredictPanel from "../components/PredictPanel";
-import ReportPanel from "../components/ReportPanel";
-import Workspace from "../components/Workspace";
 import useUploadJob from "../hooks/useUploadJob";
 import { chatQuery, generateReport, profileDataset } from "../services/api";
+
+// None of these render until a run exists — the upload screen never needs
+// them. Splitting them out is what actually shrinks the initial bundle:
+// Dashboard and its chart tree pull in recharts, which was most of the single
+// chunk Vite had been warning about since Phase 6 added the run registry.
+// `lazy` means the browser fetches the chunk the first time result or run
+// history renders, not before.
+const Dashboard = lazy(() => import("../components/Dashboard"));
+const PredictPanel = lazy(() => import("../components/PredictPanel"));
+const ChatBox = lazy(() => import("../components/ChatBox"));
+const ReportPanel = lazy(() => import("../components/ReportPanel"));
+const RunActions = lazy(() => import("../components/RunActions"));
+const Workspace = lazy(() => import("../components/Workspace"));
+
+// One fallback for all five: the chunk is usually already warm from a
+// previous run in the same session, so this shows for a beat on first load
+// and not at all after.
+function PanelFallback() {
+  return (
+    <div className="panel-loading">
+      <Loader2 size={16} className="animate-spin" />
+      <span>Loading…</span>
+    </div>
+  );
+}
 
 /**
  * The flow: pick a file → look at what is in it and choose a target → train →
@@ -233,37 +253,55 @@ export default function UploadPage() {
           </div>
 
           <ErrorBoundary title="The results dashboard could not be displayed">
-            <Dashboard result={result} />
+            <Suspense fallback={<PanelFallback />}>
+              <Dashboard result={result} />
+            </Suspense>
           </ErrorBoundary>
 
           <div className="grid-2">
             {result.run_key && (
               <ErrorBoundary title="The prediction panel could not be displayed">
-                <PredictPanel
-                  runKey={result.run_key}
-                  features={result.features || []}
-                  problemType={result.problem_type}
-                  target={result.target}
-                />
+                <Suspense fallback={<PanelFallback />}>
+                  <PredictPanel
+                    runKey={result.run_key}
+                    features={result.features || []}
+                    problemType={result.problem_type}
+                    target={result.target}
+                  />
+                </Suspense>
               </ErrorBoundary>
             )}
             {result.run_key && (
               <ErrorBoundary title="The analyst chat could not be displayed">
-                <ChatBox runKey={result.run_key} onAsk={chatQuery} />
+                <Suspense fallback={<PanelFallback />}>
+                  <ChatBox runKey={result.run_key} onAsk={chatQuery} />
+                </Suspense>
               </ErrorBoundary>
             )}
           </div>
 
           {result.run_key && (
             <ErrorBoundary title="The report could not be displayed">
-              <ReportPanel runKey={result.run_key} onGenerate={generateReport} />
+              <Suspense fallback={<PanelFallback />}>
+                <ReportPanel runKey={result.run_key} onGenerate={generateReport} />
+              </Suspense>
+            </ErrorBoundary>
+          )}
+
+          {result.run_key && (
+            <ErrorBoundary title="The share and export panel could not be displayed">
+              <Suspense fallback={<PanelFallback />}>
+                <RunActions runKey={result.run_key} />
+              </Suspense>
             </ErrorBoundary>
           )}
         </div>
       )}
 
       <ErrorBoundary title="The workspace could not be displayed">
-        <Workspace onOpenRun={showResult} activeRunKey={result?.run_key} />
+        <Suspense fallback={<PanelFallback />}>
+          <Workspace onOpenRun={showResult} activeRunKey={result?.run_key} />
+        </Suspense>
       </ErrorBoundary>
     </div>
   );
