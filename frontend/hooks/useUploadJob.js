@@ -128,7 +128,22 @@ export default function useUploadJob() {
         }
       } catch (error) {
         if (error?.name === "AbortError") return; // deliberate cancel/unmount
-        update({ loading: false, error: error?.message || "Failed to process dataset.", errorKind: "network" });
+        // "Could not reach the API" should be true, not just the default for
+        // any thrown error. fetch() itself throws TypeError when no response
+        // was possible at all (offline, connection refused, CORS). Behind a
+        // reverse proxy (nginx in prod, vite in dev), a downed backend
+        // instead surfaces as the proxy's own 502/503/504 for its
+        // unreachable upstream — still "unreachable," just with a response
+        // this time. Anything else came from unwrap() reading a real
+        // response from the app itself, with its own specific detail
+        // message already in error.message, so it gets the generic
+        // "Analysis failed" heading instead of falsely blaming connectivity.
+        const isNetworkFailure = error instanceof TypeError || [502, 503, 504].includes(error?.status);
+        update({
+          loading: false,
+          error: error?.message || "Failed to process dataset.",
+          errorKind: isNetworkFailure ? "network" : "pipeline",
+        });
       }
     },
     [update]

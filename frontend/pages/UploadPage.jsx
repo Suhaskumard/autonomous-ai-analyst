@@ -1,9 +1,10 @@
-import React, { Suspense, lazy, useCallback, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, Cpu, Loader2, Upload, X } from "lucide-react";
 
 import AccountBar from "../components/AccountBar";
 import DataProfile from "../components/DataProfile";
 import ErrorBoundary from "../components/ErrorBoundary";
+import ThemeToggle from "../components/ThemeToggle";
 import useUploadJob from "../hooks/useUploadJob";
 import { chatQuery, generateReport, profileDataset } from "../services/api";
 
@@ -50,6 +51,20 @@ export default function UploadPage() {
 
   const { loading, status, result, error, errorKind, run, cancel, reset, showResult } = useUploadJob();
   const profileControllerRef = useRef(null);
+
+  // A stable reference: an inline arrow here would give AccountBar a new
+  // `onStatusChange` on every UploadPage re-render, which — through its own
+  // useCallback dependency — reruns its identity-check effect on every
+  // render too. That fired a fresh /api/auth/me on every status-poll tick
+  // while training, not just once on mount.
+  const handleAuthStatusChange = useCallback(({ status }) => setAuthStatus(status), []);
+
+  // Reopening a run from a workspace list scrolled far down otherwise leaves
+  // the viewport past the end of the (usually shorter) dashboard that just
+  // replaced it, looking blank until the reader scrolls up by hand.
+  useEffect(() => {
+    if (result?.run_key) window.scrollTo(0, 0);
+  }, [result?.run_key]);
 
   const handleFileChange = useCallback(async (event) => {
     const chosen = event.target.files?.[0];
@@ -99,6 +114,7 @@ export default function UploadPage() {
 
   return (
     <div className="app-shell">
+      <ThemeToggle />
       <header className="header fade-in">
         <h1 className="title">AUTONOMOUS AI ANALYST</h1>
         <p className="subtitle">
@@ -107,7 +123,7 @@ export default function UploadPage() {
         </p>
       </header>
 
-      <AccountBar onStatusChange={({ status }) => setAuthStatus(status)} />
+      <AccountBar onStatusChange={handleAuthStatusChange} />
 
       {authStatus === "signed-out" && (
         // Everything below needs a credential, so showing the upload form here
@@ -190,7 +206,7 @@ export default function UploadPage() {
       {loading && (
         <div className="card fade-in" style={{ borderLeft: "4px solid var(--primary)" }}>
           <div className="progress-head">
-            <h2 style={{ fontSize: "1.1rem", margin: 0, display: "flex", alignItems: "center", gap: 10 }}>
+            <h2 className="panel-head-title" style={{ fontSize: "1.1rem" }}>
               <Activity size={18} style={{ color: "var(--primary)" }} />
               Processing pipeline
             </h2>
@@ -228,10 +244,12 @@ export default function UploadPage() {
 
       {error && (
         <div className="card fade-in notice-card-error">
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-            <AlertCircle size={22} style={{ color: "#f8717b", flexShrink: 0, marginTop: 2 }} />
-            <div>
-              <h3 style={{ margin: 0, fontSize: "1rem", color: "#f8717b" }}>{titleFor(errorKind)}</h3>
+          <div className="banner-row">
+            <div className="banner-icon" style={{ color: "#f8717b" }}>
+              <AlertCircle size={22} />
+            </div>
+            <div className="banner-body">
+              <h3 className="banner-title" style={{ fontSize: "1rem", color: "#f8717b" }}>{titleFor(errorKind)}</h3>
               <p style={{ margin: "4px 0 0", fontSize: "0.9rem", color: "rgba(248,113,123,0.85)" }}>{error}</p>
               {errorKind === "target" && (
                 <p style={{ margin: "6px 0 0", fontSize: "0.85rem", color: "var(--text-dim)" }}>
@@ -300,7 +318,11 @@ export default function UploadPage() {
 
       <ErrorBoundary title="The workspace could not be displayed">
         <Suspense fallback={<PanelFallback />}>
-          <Workspace onOpenRun={showResult} activeRunKey={result?.run_key} />
+          {/* Workspace mounts (and fetches) immediately on page load, before a
+              signed-out visitor has entered a key — authStatus is otherwise
+              unused here, but including it means signing in re-triggers the
+              fetch instead of leaving the earlier 401 on screen forever. */}
+          <Workspace onOpenRun={showResult} activeRunKey={result?.run_key} authStatus={authStatus} />
         </Suspense>
       </ErrorBoundary>
     </div>

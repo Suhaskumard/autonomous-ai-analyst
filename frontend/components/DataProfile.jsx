@@ -167,16 +167,41 @@ export default function DataProfile({
               onChange={(event) => onManualModelChange(event.target.value)}
               disabled={isTraining}
             >
-              <option value="LogisticRegression">Logistic Regression</option>
-              <option value="RandomForest">Random Forest</option>
-              <option value="ExtraTrees">Extra Trees</option>
-              <option value="GradientBoosting">Gradient Boosting</option>
-              <option value="HistGradientBoosting">Histogram Gradient Boosting</option>
-              <option value="XGBoost">XGBoost</option>
-              <option value="LightGBM">LightGBM</option>
-              <option value="DecisionTree">Decision Tree</option>
-              <option value="SVM">SVM</option>
+              {/* A numeric target's problem type isn't decided until training
+                  actually runs (see backend detect_problem_type) — a column
+                  with 15 integer values could go either way. Both groups are
+                  offered rather than guessing wrong and having every manual
+                  choice for a regression target rejected. */}
+              <optgroup label="Classification">
+                <option value="LogisticRegression">Logistic Regression</option>
+                <option value="RandomForest">Random Forest</option>
+                <option value="ExtraTrees">Extra Trees</option>
+                <option value="GradientBoosting">Gradient Boosting</option>
+                <option value="HistGradientBoosting">Histogram Gradient Boosting</option>
+                <option value="XGBoost">XGBoost</option>
+                <option value="LightGBM">LightGBM</option>
+                <option value="DecisionTree">Decision Tree</option>
+                <option value="SVM">SVM</option>
+              </optgroup>
+              <optgroup label="Regression">
+                <option value="LinearRegression">Linear Regression</option>
+                <option value="Ridge">Ridge</option>
+                <option value="Lasso">Lasso</option>
+                <option value="ElasticNet">Elastic Net</option>
+                <option value="RandomForestRegressor">Random Forest</option>
+                <option value="ExtraTreesRegressor">Extra Trees</option>
+                <option value="GradientBoostingRegressor">Gradient Boosting</option>
+                <option value="HistGradientBoostingRegressor">Histogram Gradient Boosting</option>
+                <option value="XGBoostRegressor">XGBoost</option>
+                <option value="LightGBMRegressor">LightGBM</option>
+                <option value="DecisionTreeRegressor">Decision Tree</option>
+                <option value="SVR">SVM (SVR)</option>
+              </optgroup>
             </select>
+            <p className="checkbox-note" style={{ marginTop: 6 }}>
+              Pick from the group matching your target — a numeric column trains as regression or
+              classification depending on its values, not its type alone.
+            </p>
           </div>
         )}
 

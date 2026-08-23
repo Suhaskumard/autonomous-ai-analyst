@@ -43,16 +43,16 @@ function HealthBanner({ health }) {
 
   return (
     <div className="card fade-in" style={{ borderLeft: `4px solid ${color}`, background: `${color}0f`, marginBottom: 24 }}>
-      <div style={{ display: "flex", gap: "16px", alignItems: "flex-start" }}>
-        <div style={{ color, flexShrink: 0, marginTop: 2 }}>
+      <div className="banner-row">
+        <div className="banner-icon" style={{ color }}>
           <Icon size={28} />
         </div>
-        <div style={{ flex: 1 }}>
+        <div className="banner-body">
           <div style={{ display: "flex", alignItems: "baseline", gap: "12px", flexWrap: "wrap" }}>
-            <h2 style={{ margin: 0, fontSize: "1.1rem", color }}>{health.headline}</h2>
+            <h2 className="banner-title" style={{ color }}>{health.headline}</h2>
             <span className="banner-tag">{config.label}</span>
           </div>
-          <p style={{ margin: "8px 0 12px", fontSize: "0.9rem", color: "var(--text-secondary)" }}>
+          <p className="banner-desc">
             {/* The verdict is made on macro F1, so name the metric rather than
                 assuming it is accuracy — that assumption was the bug. */}
             {`${sentenceCase(label)} ${format(health.score)} vs naive baseline ${format(health.baseline)}`}

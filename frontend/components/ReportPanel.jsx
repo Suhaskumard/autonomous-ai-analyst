@@ -34,7 +34,7 @@ export default function ReportPanel({ runKey, onGenerate }) {
   return (
     <div className="card fade-in">
       <div className="workspace-head">
-        <h2 style={{ margin: 0, display: "flex", alignItems: "center", gap: 10, fontSize: "1.15rem" }}>
+        <h2 className="panel-head-title">
           <FileText size={20} style={{ color: "var(--primary)" }} />
           Autonomous report
         </h2>
@@ -45,7 +45,7 @@ export default function ReportPanel({ runKey, onGenerate }) {
       </div>
 
       {!report && !loading && !error && (
-        <p style={{ color: "var(--text-dim)", fontSize: "0.9rem", margin: 0 }}>
+        <p className="subtle-text">
           Runs a full sweep — profiles, relationships, per-segment consistency, distributions, and the model
           result — and writes it up as one document you can copy out.
         </p>

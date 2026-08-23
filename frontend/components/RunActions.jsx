@@ -24,11 +24,11 @@ import {
 export default function RunActions({ runKey }) {
   return (
     <div className="card fade-in">
-      <h2 style={{ margin: "0 0 4px", display: "flex", alignItems: "center", gap: 10, fontSize: "1.15rem" }}>
+      <h2 className="panel-head-title" style={{ marginBottom: 4 }}>
         <Package size={20} style={{ color: "var(--primary)" }} />
         Share, export, and schedule
       </h2>
-      <p style={{ color: "var(--text-dim)", fontSize: "0.85rem", margin: "0 0 20px" }}>
+      <p className="subtle-text" style={{ marginBottom: 20 }}>
         Hand this run to someone else, take the model with you, or have the report arrive on its own.
       </p>
       <div className="run-actions">

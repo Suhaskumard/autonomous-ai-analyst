@@ -118,6 +118,8 @@ def test_the_analysis_environment_is_built_not_inherited(containerised, monkeypa
         "MPLCONFIGDIR",
         "HOME",
         "PYTHONDONTWRITEBYTECODE",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
     }
 
 

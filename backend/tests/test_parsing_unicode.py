@@ -8,6 +8,7 @@ mangled or refused any non-English dataset.
 import pandas as pd
 import pytest
 
+from exceptions import DatasetError
 from utils.helpers import ParseReport, read_csv_with_report, sanitize_text
 
 JAPANESE_CSV = ("名前,年齢,都市,購入\n田中太郎,34,東京,はい\n鈴木花子,28,大阪,いいえ\n佐藤健,45,名古屋,はい\n").encode()
@@ -90,7 +91,9 @@ def test_utf16_file_is_decoded():
 
 
 def test_binary_content_is_still_rejected():
-    with pytest.raises(ValueError, match="binary|corrupted"):
+    # DatasetError (not a bare ValueError) so routes/profile.py's uncaught call
+    # site gets a clean 400 from the app's PipelineError handler instead of a 500.
+    with pytest.raises(DatasetError, match="binary|corrupted"):
         read_csv_with_report(bytes(range(256)) * 40)
 
 

@@ -93,6 +93,20 @@ def test_profile_endpoint_enforces_upload_rules(client):
     assert response.status_code == 400
 
 
+def test_profile_endpoint_rejects_binary_content_cleanly(client):
+    """A file that passes size/extension checks but isn't text CSV.
+
+    Regression test: read_csv_with_report used to raise a bare ValueError for
+    this, which routes/profile.py never caught, so the request 500'd with a
+    raw traceback instead of the same clean 400 test_profile_endpoint_enforces_
+    upload_rules already covers for a too-small file.
+    """
+    png_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" * 20
+    response = client.post("/api/profile", files={"file": ("photo.csv", png_header, "text/csv")})
+    assert response.status_code == 400
+    assert "binary" in response.json()["detail"].lower()
+
+
 # --- diagnostics ------------------------------------------------------------
 
 

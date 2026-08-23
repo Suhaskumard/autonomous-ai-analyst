@@ -79,7 +79,13 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 def runtime_available(runtime: str) -> None:
     print("1. runtime")
     try:
-        done = subprocess.run([runtime, "version", "--format", "{{.Server.Version}}"], capture_output=True, text=True)
+        done = subprocess.run(
+            [runtime, "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     except FileNotFoundError:
         raise Failure(f"{runtime!r} is not on PATH.") from None
     check(f"{runtime} daemon answers", done.returncode == 0, (done.stderr or "").strip()[:200])
@@ -94,10 +100,14 @@ def image_present(runtime: str, image: str, build: bool) -> None:
             [runtime, "build", "-f", str(DOCKERFILE), "-t", image, str(BACKEND_DIR)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         check("image builds", done.returncode == 0, (done.stderr or "").strip()[-400:])
 
-    done = subprocess.run([runtime, "image", "inspect", image], capture_output=True, text=True)
+    done = subprocess.run(
+        [runtime, "image", "inspect", image], capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
     check(
         f"{image} exists",
         done.returncode == 0,
@@ -156,7 +166,9 @@ def _probe(code: str) -> subprocess.CompletedProcess:
     # build_argv ends with `--entrypoint python <image> -I /app/runner.py`.
     # Keep everything through the image and substitute the command.
     assert argv[-2:] == ["-I", container.CONTAINER_RUNNER_PATH]
-    return subprocess.run(argv[:-2] + ["-c", code], capture_output=True, text=True, timeout=TIMEOUT)
+    return subprocess.run(
+        argv[:-2] + ["-c", code], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=TIMEOUT
+    )
 
 
 def network_is_gone() -> None:
@@ -210,7 +222,10 @@ def runaway_is_stopped(run_code, runtime: str) -> None:
     before = _running_sandboxes(runtime)
     result = run_code("while True:\n    pass\n", None)
     check("an infinite loop is timed out", not result.ok, "it returned successfully")
-    check("and reported as a timeout", "timed out" in (result.error or "").lower(), result.error or "")
+    # Two honest paths end here: the outer wall-clock timeout, or (far more
+    # often, for a CPU-bound loop) the container's own RLIMIT_CPU killing it
+    # first. Both say "stopped"; neither is the old bare "no output".
+    check("and reported as stopped, not a bare crash", "stopped" in (result.error or "").lower(), result.error or "")
 
     after = _running_sandboxes(runtime)
     leaked = after - before
@@ -226,6 +241,8 @@ def _running_sandboxes(runtime: str) -> set[str]:
         [runtime, "ps", "--filter", "name=analyst-sandbox-", "--format", "{{.Names}}"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     return {line.strip() for line in done.stdout.splitlines() if line.strip()}

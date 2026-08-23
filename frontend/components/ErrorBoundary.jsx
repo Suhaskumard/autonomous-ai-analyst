@@ -29,29 +29,18 @@ export default class ErrorBoundary extends React.Component {
 
     return (
       <div className="card fade-in" style={{ borderLeft: "4px solid #f87171" }}>
-        <div style={{ display: "flex", gap: "16px", alignItems: "flex-start" }}>
-          <div style={{ color: "#f87171", flexShrink: 0, marginTop: "2px" }}>
+        <div className="banner-row">
+          <div className="banner-icon" style={{ color: "#f87171" }}>
             <AlertOctagon size={26} />
           </div>
-          <div style={{ flex: 1 }}>
-            <h2 style={{ margin: 0, fontSize: "1.05rem", color: "#f8717b" }}>
+          <div className="banner-body">
+            <h2 className="banner-title" style={{ color: "#f8717b" }}>
               {this.props.title || "This panel could not be displayed"}
             </h2>
-            <p style={{ margin: "8px 0 12px", fontSize: "0.9rem", color: "var(--text-secondary)" }}>
+            <p className="banner-desc">
               The analysis itself completed — only this view failed to render. The rest of the page is unaffected.
             </p>
-            <pre
-              style={{
-                margin: "0 0 16px",
-                padding: "12px",
-                background: "rgba(248, 113, 113, 0.06)",
-                borderRadius: "10px",
-                fontSize: "0.78rem",
-                color: "var(--text-dim)",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-              }}
-            >
+            <pre className="error-boundary-detail">
               {String(this.state.error?.message || this.state.error)}
             </pre>
             <button className="btn btn-secondary" type="button" onClick={this.reset}>

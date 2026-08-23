@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from exceptions import DatasetError
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODEL_DIR = BASE_DIR / "models" / "saved_models"
 METADATA_DIR = BASE_DIR / "models" / "metadata"
@@ -198,13 +200,13 @@ def read_csv_with_report(file_bytes: bytes) -> tuple[pd.DataFrame, ParseReport]:
     text, encoding = _decode(file_bytes)
 
     if len(text.strip()) == 0:
-        raise ValueError("Uploaded file appears empty or unreadable.")
+        raise DatasetError("Uploaded file appears empty or unreadable.")
 
     # A binary file is mostly characters no text encoding would produce. This
     # counts Unicode printability, so a Japanese or Arabic CSV passes.
     printable = sum(1 for ch in text if ch in "\r\n\t" or unicodedata.category(ch) not in _UNPRINTABLE_CATEGORIES)
     if printable / max(len(text), 1) < 0.85:
-        raise ValueError("Uploaded file does not look like a valid text CSV (possible binary/corrupted file).")
+        raise DatasetError("Uploaded file does not look like a valid text CSV (possible binary/corrupted file).")
 
     delimiter = detect_delimiter(text)
     # Ordered fallbacks, but always with a known delimiter — pandas' own

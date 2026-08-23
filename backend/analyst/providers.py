@@ -26,6 +26,10 @@ class ToolCall:
     arguments: dict
     # Providers that correlate calls to results by id supply one.
     call_id: str | None = None
+    # Gemini's "thinking" models (e.g. gemini-3-flash-preview) attach an opaque
+    # signature to each function call and reject the next turn if a replayed
+    # call is missing it. Only Gemini sets this; other providers leave it None.
+    thought_signature: bytes | None = None
 
 
 @dataclass
@@ -161,7 +165,10 @@ def _to_gemini_content(turn: Turn) -> Any:
         if turn.text:
             parts.append(types.Part(text=turn.text))
         for call in turn.tool_calls:
-            parts.append(types.Part.from_function_call(name=call.name, args=call.arguments))
+            part = types.Part.from_function_call(name=call.name, args=call.arguments)
+            if call.thought_signature:
+                part.thought_signature = call.thought_signature
+            parts.append(part)
         return types.Content(role="model", parts=parts or [types.Part(text=" ")])
 
     return types.Content(role="user", parts=[types.Part(text=turn.text or " ")])
@@ -181,7 +188,13 @@ def _from_gemini_response(response) -> LLMReply:
                 texts.append(part.text)
             call = getattr(part, "function_call", None)
             if call is not None and getattr(call, "name", None):
-                calls.append(ToolCall(name=call.name, arguments=dict(getattr(call, "args", None) or {})))
+                calls.append(
+                    ToolCall(
+                        name=call.name,
+                        arguments=dict(getattr(call, "args", None) or {}),
+                        thought_signature=getattr(part, "thought_signature", None),
+                    )
+                )
 
     usage = getattr(response, "usage_metadata", None)
     return LLMReply(

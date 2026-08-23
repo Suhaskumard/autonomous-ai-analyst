@@ -35,6 +35,13 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
 
+      # xgboost and lightgbm both link against OpenMP; the backend Dockerfile
+      # already installs this for the same reason (see its comment), but
+      # ubuntu-latest runners don't carry it by default. Without this, every
+      # test file that imports ml/train.py fails to collect.
+      - name: Install libgomp (xgboost/lightgbm runtime dependency)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+
       - name: Install pinned dependencies
         run: pip install -r backend/requirements-dev.txt
 
@@ -78,6 +85,9 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install libgomp (xgboost/lightgbm runtime dependency)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
 
       - name: Install pinned dependencies
         run: pip install -r backend/requirements-dev.txt

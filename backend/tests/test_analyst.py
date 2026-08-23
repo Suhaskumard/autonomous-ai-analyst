@@ -93,7 +93,11 @@ def test_an_error_is_reported_rather_than_raised(snapshot):
 def test_an_infinite_loop_is_killed(snapshot):
     result = sandbox.run_code("while True: pass", snapshot, timeout_seconds=3)
     assert not result.ok
-    assert "timed out" in result.error
+    # Two honest paths land here: the outer wall-clock timeout, or (far more
+    # often, for a CPU-bound loop) the RLIMIT_CPU hard limit killing it first
+    # — see sandbox.py's _killed_by_signal. Both say "stopped"; neither is a
+    # bare, unexplained "no output".
+    assert "stopped" in result.error
 
 
 @pytest.mark.parametrize(
@@ -462,6 +466,33 @@ def test_chat_degrades_gracefully_without_a_provider(client, fixture_csv):
     assert len(client.get(f"/api/chat/conversation/{body['conversation_id']}").json()["messages"]) == 2
 
 
+def test_chat_degrades_gracefully_when_the_provider_call_fails(client, fixture_csv):
+    """A configured key can still fail at call time — revoked, rate-limited, offline.
+
+    That must degrade the same way a missing key does, not 500 with a raw
+    traceback. Regression test for the leaked-key incident: the real Gemini
+    key was auto-revoked by Google mid-session and every question 500'd until
+    routes/chat.py wrapped run_agent() in a try/except.
+    """
+
+    class RaisingProvider:
+        name = "raising"
+        model = "raising-1"
+
+        def complete(self, system, turns, tools):
+            raise RuntimeError("403 PERMISSION_DENIED: Your API key was reported as leaked.")
+
+    set_provider_override(RaisingProvider())
+    run_key = upload_and_wait(client, fixture_csv(FIXTURE))["result"]["run_key"]
+
+    response = client.post("/api/chat", json={"run_key": run_key, "query": "hello"})
+
+    assert response.status_code == 200
+    body = response.json()["response"]
+    assert body["llm_enabled"] is False
+    assert "could not be reached" in body["answer"]
+
+
 def test_an_empty_question_is_rejected(client, fixture_csv, fake_provider):
     fake_provider([LLMReply(text="ok")])
     run_key = upload_and_wait(client, fixture_csv(FIXTURE))["result"]["run_key"]
@@ -551,7 +582,11 @@ def test_a_failing_narrative_does_not_lose_the_findings(frame, snapshot):
 
     report = report_module.build_report(frame, {"target": "churn"}, snapshot, "a" * 64, provider=Exploding())
 
-    assert "quota exhausted" in report["narrative_error"]
+    # The reader sees a clean, generic message — not the raw provider
+    # exception, which can carry internal quota-metric identifiers and
+    # billing links that mean nothing to them and do not belong on screen.
+    assert "could not be generated" in report["narrative_error"]
+    assert "quota exhausted" not in report["narrative_error"]
     assert any(section["id"] == "correlations" for section in report["sections"])
 
 

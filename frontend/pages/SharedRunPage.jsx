@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useEffect, useState } from "react";
 import { Eye, Loader2 } from "lucide-react";
 
 import ErrorBoundary from "../components/ErrorBoundary";
+import ThemeToggle from "../components/ThemeToggle";
 import { getSharedRun } from "../services/api";
 
 const Dashboard = lazy(() => import("../components/Dashboard"));
@@ -34,13 +35,14 @@ export default function SharedRunPage({ token }) {
   }, [token]);
 
   return (
-    <div className="container">
-      <header className="app-header">
-        <h1 style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <Eye size={26} style={{ color: "var(--primary)" }} />
+    <div className="app-shell">
+      <ThemeToggle />
+      <header className="header fade-in">
+        <h1 className="title" style={{ fontSize: "clamp(1.8rem, 4vw, 2.6rem)", display: "flex", alignItems: "center", justifyContent: "center", gap: 12 }}>
+          <Eye size={30} style={{ color: "var(--primary)" }} />
           Shared analysis
         </h1>
-        <p style={{ color: "var(--text-dim)", fontSize: "0.9rem", margin: 0 }}>
+        <p className="subtitle">
           A read-only view of one run. It expires, and whoever shared it can revoke it at any time.
         </p>
       </header>

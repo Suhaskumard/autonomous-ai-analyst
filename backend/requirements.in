@@ -14,6 +14,13 @@ google-genai
 python-dotenv
 pydantic-settings
 sqlmodel
+# The analyst's plot tool draws figures during chat (analyst/runner.py
+# renders them to an in-memory PNG, Agg backend, no display needed). Pinned
+# here rather than left implicit: analyst/runner.py's own comment already
+# assumed "matplotlib ships with the app", but nothing actually shipped it —
+# only a machine that happened to have it installed some other way passed
+# the plotting tests, and a clean install silently lost the feature.
+matplotlib
 # Phase 4: a broader model registry and SMOTE oversampling. CatBoost is also
 # supported when installed, but is not pinned here: the wheel is ~100 MB and
 # LightGBM covers the same ground at a fraction of the install cost.

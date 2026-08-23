@@ -63,7 +63,13 @@ async function unwrap(res) {
     }
   }
   if (res.status === 401) throw new UnauthorizedError(message);
-  throw new Error(message);
+  const err = new Error(message);
+  // Not read by every caller, but useUploadJob needs it to tell "the app
+  // errored" (any other status, with its own specific detail above) apart
+  // from "nothing was listening" (502/503/504 — a reverse proxy's own error
+  // page for an unreachable upstream, not the app responding at all).
+  err.status = res.status;
+  throw err;
 }
 
 // One place where the credential is attached, so a new endpoint cannot forget.

@@ -278,13 +278,19 @@ def _narrate(provider: LLMProvider | None, metadata: dict, findings: dict) -> tu
     try:
         reply = provider.complete(NARRATIVE_SYSTEM, [Turn(role="user", text=prompt)], [])
     except Exception as exc:
+        # Logged in full for an operator to read; never shown to the caller —
+        # a provider's raw error can carry internal quota-metric identifiers,
+        # billing links, and other detail that means nothing to the reader
+        # and does not belong in a report. Mirrors routes/chat.py's provider-
+        # failure handling, which shows the same shape of generic message.
         logger.warning("Report narrative failed: %s", exc)
         # No tokens claimed on a failure: the call may well have been billed,
         # but this process has no number for it, and inventing one would make
         # the usage table wrong in the direction that matters.
         return (
             "",
-            f"The written summary could not be generated ({exc}). The computed findings below are unaffected.",
+            "The written summary could not be generated (authentication, quota, or network issue). "
+            "The computed findings below are unaffected.",
             no_usage,
         )
     return reply.text.strip(), None, {"input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens}

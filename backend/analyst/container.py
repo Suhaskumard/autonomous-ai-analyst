@@ -202,8 +202,12 @@ def build_argv(snapshot_path: Path | str | None, name: str) -> list[str]:
     # The entrypoint is given explicitly rather than relied upon from the
     # image, so pointing SANDBOX_IMAGE at a plain python image with the
     # dependencies installed also works. -I is isolated mode, exactly as the
-    # subprocess backend uses it.
-    argv += ["--entrypoint", "python", settings.sandbox_image, "-I", CONTAINER_RUNNER_PATH]
+    # subprocess backend uses it — and -B alongside it for the same reason:
+    # -I implies -E, which makes -I ignore PYTHONDONTWRITEBYTECODE below, so a
+    # cold __pycache__ (a freshly built image, not a warmed dev machine) makes
+    # the first import inside a guarded exec() trip the write-audit hook. See
+    # analyst/sandbox.py's _spawn_plan for how this was actually found.
+    argv += ["--entrypoint", "python", settings.sandbox_image, "-I", "-B", CONTAINER_RUNNER_PATH]
     return argv
 
 
@@ -220,6 +224,15 @@ def _child_env() -> dict[str, str]:
         "MPLCONFIGDIR": f"{CONTAINER_TMPFS}/mpl",
         "HOME": CONTAINER_TMPFS,
         "PYTHONDONTWRITEBYTECODE": "1",
+        # OpenBLAS's threaded memory-pool allocator fails outright as the
+        # non-root UID this image runs under ("Memory allocation still failed
+        # after 10 retries, giving up.", found by ops/verify_sandbox.py against
+        # a real daemon — root works, UID 10001 does not). Forcing BLAS
+        # single-threaded sidesteps the allocator path that breaks, and costs
+        # nothing extra: --cpus is already 1 by default, so a second BLAS
+        # thread had no core to run on anyway.
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
     }
 
 

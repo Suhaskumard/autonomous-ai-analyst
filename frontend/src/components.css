@@ -31,6 +31,48 @@
   display: inline-flex;
 }
 
+/* --- banner card: icon + colour-coded border, used for health/error/warning
+   callouts (health verdict, failed models, parse notes, error boundaries).
+   The border/background colour stays inline per instance since it carries
+   the instance's meaning (success, warning, error). --- */
+.banner-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.banner-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.banner-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.banner-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.banner-desc {
+  margin: 8px 0 12px;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.error-boundary-detail {
+  margin: 0 0 16px;
+  padding: 12px;
+  background: rgba(248, 113, 113, 0.06);
+  border-radius: 10px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .input-icon {
   position: absolute;
   left: 16px;
@@ -93,13 +135,22 @@
   color: var(--text-primary);
 }
 
-/* Wide content scrolls inside its own container; the page never does. */
+/* Wide content scrolls inside its own container; the page never does.
+   `contain: layout` is load-bearing, not decorative: a wide <table>'s layout
+   overflow can still propagate to document.documentElement.scrollWidth even
+   though `overflow: auto` correctly clips and scrolls it visually — that
+   propagation is what let the whole page pan sideways on narrow viewports
+   (confirmed via window.scrollTo actually moving scrollX). `contain: layout`
+   is the actual fix; overflow-x: hidden alone was not enough. */
 .chart-table-wrap,
 .profile-table-wrap,
 .workspace-table-wrap,
 .results-table-wrap,
 .matrix-scroll {
   overflow: auto;
+  width: 100%;
+  max-width: 100%;
+  contain: layout;
 }
 
 .chart-table,
@@ -740,6 +791,12 @@
   margin-right: 10px;
 }
 
+/* Grid item: without min-width:0 a long feature name or fingerprint can push
+   the grid wider than its column instead of wrapping/eliding. */
+.run-preview-block {
+  min-width: 0;
+}
+
 .run-preview-failed {
   margin-top: 10px !important;
   font-size: 0.82rem !important;
@@ -1123,6 +1180,11 @@
   margin-top: 24px;
   font-size: 0.82rem;
   color: var(--text-dim);
+}
+
+.report {
+  display: flex;
+  flex-direction: column;
 }
 
 .report-source pre {

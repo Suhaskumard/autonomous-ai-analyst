@@ -53,8 +53,17 @@ def _child_env() -> dict[str, str]:
     # matplotlib looks for a home directory to cache its font list in, and the
     # child is not given one. Point it somewhere disposable instead.
     env["MPLCONFIGDIR"] = str(_mpl_cache_dir())
-    # Keeps a crashing child from writing .pyc files next to the runner.
+    # Belt and suspenders alongside argv's -B in _spawn_plan: -I ignores this,
+    # but it costs nothing to set for anything invoked without -I.
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # OpenBLAS's threaded memory-pool allocator can fail outright under
+    # apply_resource_limits()'s RLIMIT_AS ("Memory allocation still failed
+    # after 10 retries, giving up.", found the same way the container
+    # backend's identical failure was — see analyst/container.py's
+    # _child_env() for that half of the story). Single-threaded BLAS avoids
+    # the allocator path that breaks under a constrained address space.
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["OMP_NUM_THREADS"] = "1"
     return env
 
 
@@ -161,7 +170,16 @@ def _spawn_plan(snapshot_path: Path | str | None, timeout: int) -> _SpawnPlan:
             # no PYTHONPATH. The runner is invoked by path rather than as
             # `-m analyst.runner` precisely because of that last one, and it
             # imports nothing from the app so it needs neither.
-            argv=[sys.executable, "-I", str(RUNNER_PATH)],
+            #
+            # -I also means -E: PYTHONDONTWRITEBYTECODE in the env below is
+            # silently ignored. On a machine whose stdlib/site-packages
+            # __pycache__ was never warmed (a fresh container, a fresh venv —
+            # not a dev machine that has already imported scipy a thousand
+            # times), the first cold import inside the guarded exec() tries to
+            # write a .pyc and the audit hook refuses it, aborting analysis
+            # code that never touched a file itself. -B forces the same thing
+            # -I can't reach through the environment.
+            argv=[sys.executable, "-I", "-B", str(RUNNER_PATH)],
             snapshot_path=str(snapshot_path) if snapshot_path else None,
             wall_clock=timeout,
             env=_child_env(),
@@ -246,6 +264,26 @@ def _run_code(code: str, snapshot_path: Path | str | None, timeout_seconds: int 
     duration = int((time.perf_counter() - started) * 1000)
     payload = _parse_response(completed.stdout)
     if payload is None:
+        killed_by = _killed_by_signal(completed.returncode)
+        if killed_by in ("SIGKILL", "SIGXCPU"):
+            # request["cpu_seconds"] (timeout - 1) reliably fires before the
+            # outer subprocess.run(timeout=plan.wall_clock) does, so a runaway
+            # loop dies here — via the kernel's RLIMIT_CPU hard limit, which
+            # sends SIGKILL rather than the catchable SIGXCPU once soft and
+            # hard limits are equal — not via the TimeoutExpired branch above.
+            # It used to surface as a bare "no output", indistinguishable from
+            # a real crash; this is what a runaway analysis actually looks
+            # like under both backends, so it gets its own honest message.
+            logger.info("Sandbox process was killed (%s), likely the CPU or memory limit", killed_by)
+            return ExecutionResult(
+                ok=False,
+                code=code,
+                error=(
+                    f"Execution was stopped after {timeout} seconds — it used too much CPU time or "
+                    "memory before it could return a result. Try a narrower question."
+                ),
+                duration_ms=duration,
+            )
         detail = (completed.stderr or "").strip()[-800:] or "no output"
         logger.warning("Sandbox produced no parsable result: %s", detail)
         return ExecutionResult(
@@ -277,3 +315,27 @@ def _parse_response(stdout: str) -> dict | None:
         return json.loads(tail.strip())
     except json.JSONDecodeError:
         return None
+
+
+#: The child that hits this is always Linux — the subprocess backend's
+#: RLIMIT_CPU comes from the `resource` module, which does not exist on
+#: Windows, and the container backend's image is Linux regardless of the
+#: host. `signal.Signals(9)` would be the platform-portable way to name these,
+#: except the *host* running this code (this developer machine, for one) can
+#: itself be Windows, where that enum has no member for a POSIX-only number
+#: and raises ValueError — so the numbers are named by hand instead.
+_SIGNAL_NAMES = {9: "SIGKILL", 24: "SIGXCPU"}
+
+
+def _killed_by_signal(returncode: int) -> str | None:
+    """The signal that ended the process, if any — for the subprocess backend
+    (a negative returncode is the direct, POSIX convention) and the container
+    backend (docker translates a signal death to exit code 128+signal) alike.
+    """
+    if returncode < 0:
+        number = -returncode
+    elif returncode >= 128:
+        number = returncode - 128
+    else:
+        return None
+    return _SIGNAL_NAMES.get(number)

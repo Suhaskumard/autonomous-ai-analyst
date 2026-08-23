@@ -98,7 +98,10 @@ describe("useUploadJob polling", () => {
   });
 
   it("reports a network failure instead of hanging", async () => {
-    api.startUploadJob.mockRejectedValue(new Error("Failed to fetch"));
+    // A real fetch() throws TypeError specifically when no response was
+    // possible at all — that's what distinguishes a genuine connectivity
+    // failure from a caught HTTP error response in the hook's classification.
+    api.startUploadJob.mockRejectedValue(new TypeError("Failed to fetch"));
 
     const { result } = renderHook(() => useUploadJob());
     await act(async () => {
@@ -107,6 +110,39 @@ describe("useUploadJob polling", () => {
 
     expect(result.current.errorKind).toBe("network");
     expect(result.current.loading).toBe(false);
+  });
+
+  it("treats a reverse proxy's unreachable-upstream response as a network failure too", async () => {
+    // A downed backend behind nginx (prod) or vite (dev) doesn't fail the
+    // fetch — the proxy answers on its own with a 502/503/504. Still "could
+    // not reach the API," just with a response this time.
+    const proxyError = new Error("Request failed (502)");
+    proxyError.status = 502;
+    api.startUploadJob.mockRejectedValue(proxyError);
+
+    const { result } = renderHook(() => useUploadJob());
+    await act(async () => {
+      await result.current.run(new FormData());
+    });
+
+    expect(result.current.errorKind).toBe("network");
+  });
+
+  it("does not blame connectivity for a real error response from the app itself", async () => {
+    // unwrap() throws a plain Error with the backend's own detail message
+    // for any other status — that is an application failure, not the API
+    // being unreachable, and should not get the "Could not reach" heading.
+    const appError = new Error("The dataset could not be parsed.");
+    appError.status = 500;
+    api.startUploadJob.mockRejectedValue(appError);
+
+    const { result } = renderHook(() => useUploadJob());
+    await act(async () => {
+      await result.current.run(new FormData());
+    });
+
+    expect(result.current.errorKind).toBe("pipeline");
+    expect(result.current.error).toBe("The dataset could not be parsed.");
   });
 
   it("swallows a deliberate cancel rather than showing an error", async () => {

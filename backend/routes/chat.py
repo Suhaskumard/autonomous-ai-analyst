@@ -219,7 +219,19 @@ def chat(req: ChatRequest, principal: Principal = Depends(current_principal)):
     turns, trimmed = trim_to_budget(turns, settings.chat_token_budget // 2)
 
     toolset = build_toolset(df, metadata, snapshot_path, run_key, owner_scope(principal) or db.LOCAL_OWNER_ID)
-    result = run_agent(provider, _system_prompt(metadata, df), turns, toolset)
+    try:
+        result = run_agent(provider, _system_prompt(metadata, df), turns, toolset)
+    except Exception:
+        # A configured provider can still fail at call time (bad/revoked key,
+        # quota, network) — that must degrade like "no provider configured"
+        # rather than 500 with a raw traceback reaching the client.
+        logger.exception("Provider call failed for run %s", run_key)
+        answer = (
+            "The AI provider could not be reached (authentication, quota, or network issue). "
+            "The dashboard, charts, and predictions are unaffected — try asking again shortly."
+        )
+        db.append_message(conversation_id, "assistant", answer)
+        return _degraded(run_key, query, conversation_id, answer)
 
     answer = result.answer
     if trimmed:

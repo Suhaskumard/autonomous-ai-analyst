@@ -20,7 +20,7 @@ const VERDICT_LABEL = {
  * into the dashboard, compared against up to three others, or deleted along
  * with its artifacts.
  */
-export default function Workspace({ onOpenRun, activeRunKey }) {
+export default function Workspace({ onOpenRun, activeRunKey, authStatus }) {
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -54,7 +54,11 @@ export default function Workspace({ onOpenRun, activeRunKey }) {
     refresh();
     // Abort the in-flight request if the panel unmounts mid-load.
     return () => controllerRef.current?.abort();
-  }, [refresh, activeRunKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- authStatus is
+    // a re-fetch trigger, not a value read inside refresh(): this panel
+    // mounts before a signed-out visitor has a key, so its first request
+    // 401s, and nothing else would tell it to try again once they sign in.
+  }, [refresh, activeRunKey, authStatus]);
 
   const toggleSelected = (runKey) => {
     setComparison(null);
@@ -132,7 +136,7 @@ export default function Workspace({ onOpenRun, activeRunKey }) {
   return (
     <div className="card fade-in">
       <div className="workspace-head">
-        <h2 style={{ margin: 0, display: "flex", alignItems: "center", gap: "10px", fontSize: "1.15rem" }}>
+        <h2 className="panel-head-title">
           <FolderOpen size={20} style={{ color: "var(--primary)" }} />
           Dataset workspace
         </h2>

@@ -1,0 +1,21 @@
+title = "gitleaks config for autonomous-ai-analyst"
+
+# Extend the default ruleset rather than replace it — we only need to allow
+# two known-fake fixtures the tests use on purpose, not redefine what a
+# secret looks like.
+[extend]
+useDefault = true
+
+# These are literal placeholder strings the test suite asserts against, not
+# credentials. The CI "Secret scan" job has been red since Phase 2 because of
+# this, with nobody following up — which is exactly the kind of ignored red
+# build that let a real key sit exposed for weeks. Allowlisting these two
+# fixtures by their exact fake content (not by path, so a real secret pasted
+# into a test file anywhere still gets caught) is what makes the scan
+# trustworthy enough to act as a gate again.
+[allowlist]
+description = "Known-fake credentials used only as test fixtures — not real secrets"
+regexes = [
+  '''0123456789abcdef''', # backend/tests/test_security.py — a fake dataset-hash-shaped key (gitleaks reports only the first 16-char repeat unit it matched, not the full 64-char literal)
+  '''AIza-(not-a-real-key|secret-value)''',    # backend/tests/test_abuse.py, test_sandbox_isolation.py — fake Gemini-shaped keys
+]

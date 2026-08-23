@@ -39,21 +39,29 @@ RUN apt-get update \
 # every run. analyst/container.py already passes these two explicitly when it
 # invokes this image for real; set here too so the image behaves the same way
 # run directly, the way this file's own docstring above tells someone to.
+# OPENBLAS_NUM_THREADS/OMP_NUM_THREADS=1: OpenBLAS's threaded memory-pool
+# allocator fails outright under the non-root UID this image runs as below
+# ("Memory allocation still failed after 10 retries, giving up." — verified
+# against a real daemon with ops/verify_sandbox.py; root works, UID 10001
+# does not). Single-threaded BLAS sidesteps the allocator path that breaks,
+# and costs nothing since --cpus is 1 by default anyway. analyst/container.py
+# passes these two explicitly for the same reason this file's own docstring
+# says to set them here too.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     MPLBACKEND=Agg \
     MPLCONFIGDIR=/tmp/mpl \
-    HOME=/tmp
+    HOME=/tmp \
+    OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1
 
-# Pinned to the same versions as backend/requirements.txt. They have to match:
-# an answer computed here and an answer computed by the API's own pandas must
-# be the same answer, or "the numbers can be checked by hand" stops being true.
-#
-# matplotlib is here and is *not* in backend/requirements.txt, which is
-# deliberate rather than an oversight. runner.py treats it as optional and skips
-# figures when it is missing; including it means switching to this backend never
-# takes a capability away from an install whose host Python happens to have it.
+# Pinned to the same versions as backend/requirements.txt, matplotlib
+# included now that it is a real pinned dependency there too (it backs the
+# analyst's plot tool — it was never actually optional, just previously
+# unpinned). They have to match: an answer computed here and an answer
+# computed by the API's own pandas must be the same answer, or "the numbers
+# can be checked by hand" stops being true.
 RUN pip install --no-cache-dir \
     numpy==2.5.2 \
     pandas==3.0.5 \
@@ -61,7 +69,7 @@ RUN pip install --no-cache-dir \
     scikit-learn==1.9.0 \
     joblib==1.5.3 \
     threadpoolctl==3.6.0 \
-    matplotlib==3.10.9
+    matplotlib==3.11.1
 
 WORKDIR /app
 
