@@ -124,6 +124,15 @@ function sentenceCase(text) {
   return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
 }
 
+// Model names come back from the backend as bare class names —
+// "LogisticRegression", "GradientBoosting" — with no spaces to wrap at, so a
+// narrow stat card broke them mid-word ("LogisticRegr" / "ession"). Splitting
+// on lower-to-upper transitions gives it word boundaries to wrap on instead,
+// while leaving acronym runs like "SVM" or the "GBM" in "LightGBM" intact.
+function humanizeModelName(text) {
+  return typeof text === "string" ? text.replace(/([a-z0-9])([A-Z])/g, "$1 $2") : text;
+}
+
 function MetricCard({ label, value, icon: Icon, color }) {
   return (
     <div className="stat-card fade-in">
@@ -131,7 +140,7 @@ function MetricCard({ label, value, icon: Icon, color }) {
         {Icon && <Icon size={20} />}
       </div>
       <div className="stat-value" style={{ color }}>
-        {typeof value === "number" ? formatNumber(value, 4) : value}
+        {typeof value === "number" ? formatNumber(value, 4) : humanizeModelName(value)}
       </div>
       <div className="stat-label">{label}</div>
     </div>

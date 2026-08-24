@@ -1,5 +1,15 @@
 import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
-import { Activity, AlertCircle, CheckCircle2, Cpu, Loader2, Upload, X } from "lucide-react";
+import {
+  Activity,
+  AlertCircle,
+  CheckCircle2,
+  Cpu,
+  Loader2,
+  MessageSquareText,
+  Sparkles,
+  Upload,
+  X,
+} from "lucide-react";
 
 import AccountBar from "../components/AccountBar";
 import DataProfile from "../components/DataProfile";
@@ -32,6 +42,12 @@ function PanelFallback() {
     </div>
   );
 }
+
+const HOW_IT_WORKS = [
+  { icon: Upload, title: "Upload & profile", body: "Drop in a CSV — column types, missing values, and target candidates surface before anything trains." },
+  { icon: Cpu, title: "Train & explain", body: "Auto-picks or lets you choose a model, then reports the scores and the features driving them." },
+  { icon: MessageSquareText, title: "Ask & export", body: "Query the trained model in plain language, predict on new rows, and export a shareable report." },
+];
 
 /**
  * The flow: pick a file → look at what is in it and choose a target → train →
@@ -113,8 +129,21 @@ export default function UploadPage() {
   }, [reset]);
 
   return (
-    <div className="app-shell">
-      <ThemeToggle />
+    <>
+      <div className="topbar">
+        <div className="topbar-brand">
+          <span className="topbar-mark">
+            <Sparkles size={17} />
+          </span>
+          Autonomous AI Analyst
+        </div>
+        <div className="topbar-actions">
+          <AccountBar onStatusChange={handleAuthStatusChange} />
+          <ThemeToggle />
+        </div>
+      </div>
+
+      <div className="app-shell">
       <header className="header fade-in">
         <h1 className="title">AUTONOMOUS AI ANALYST</h1>
         <p className="subtitle">
@@ -122,8 +151,6 @@ export default function UploadPage() {
           actually check.
         </p>
       </header>
-
-      <AccountBar onStatusChange={handleAuthStatusChange} />
 
       {authStatus === "signed-out" && (
         // Everything below needs a credential, so showing the upload form here
@@ -181,6 +208,21 @@ export default function UploadPage() {
               {profileError}
             </div>
           )}
+        </div>
+      )}
+
+      {authStatus !== "signed-out" && !profile && !result && (
+        <div className="how-it-works fade-in">
+          {HOW_IT_WORKS.map((step, index) => (
+            <div className="how-step" key={step.title}>
+              <span className="how-step-number">{String(index + 1).padStart(2, "0")}</span>
+              <div className="icon-chip how-step-icon">
+                <step.icon size={20} />
+              </div>
+              <h3>{step.title}</h3>
+              <p>{step.body}</p>
+            </div>
+          ))}
         </div>
       )}
 
@@ -325,7 +367,8 @@ export default function UploadPage() {
           <Workspace onOpenRun={showResult} activeRunKey={result?.run_key} authStatus={authStatus} />
         </Suspense>
       </ErrorBoundary>
-    </div>
+      </div>
+    </>
   );
 }
 

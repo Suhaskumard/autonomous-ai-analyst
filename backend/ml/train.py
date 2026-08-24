@@ -112,11 +112,18 @@ def detect_problem_type(y: pd.Series) -> str:
         return "classification"
 
     # Continuous values are a regression target no matter how few of them there
-    # are — 8 distinct prices are still prices.
+    # are — 8 distinct prices are still prices. rtol=0 is deliberate:
+    # np.allclose's default rtol=1e-5 scales with magnitude, so at prices in
+    # the hundreds of thousands a fractional difference of several dollars
+    # (285000.50 vs 285000) reads as "close enough" and this check silently
+    # never fires — every large-valued continuous target then falls through
+    # to the n_unique<=20 rule below and gets fit as classification instead.
+    # An absolute tolerance answers the actual question, "is the fractional
+    # part negligible," regardless of the column's scale.
     as_float = non_null.astype(float)
     if not np.all(np.isfinite(as_float)):
         as_float = as_float[np.isfinite(as_float)]
-    if len(as_float) and not np.allclose(as_float, np.round(as_float)):
+    if len(as_float) and not np.allclose(as_float, np.round(as_float), rtol=0, atol=1e-6):
         return "regression"
 
     n_unique = int(non_null.nunique())

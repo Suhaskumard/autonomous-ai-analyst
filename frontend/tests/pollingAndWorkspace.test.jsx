@@ -204,16 +204,34 @@ describe("Workspace", () => {
     expect(onOpenRun).toHaveBeenCalledWith(reopened);
   });
 
-  it("deletes a run and refreshes the list", async () => {
+  it("deletes a run and refreshes the list, but only after the user confirms", async () => {
     api.deleteRun.mockResolvedValue({ deleted: true });
     api.listRuns.mockResolvedValueOnce({ count: 1, runs: [RUN] }).mockResolvedValueOnce({ count: 0, runs: [] });
     const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<Workspace onOpenRun={vi.fn()} />);
     await user.click(await screen.findByRole("button", { name: /Delete customers.csv/i }));
 
+    expect(confirmSpy).toHaveBeenCalled();
     await waitFor(() => expect(api.deleteRun).toHaveBeenCalledWith(RUN.run_key));
     expect(await screen.findByText(/No past runs yet/i)).toBeInTheDocument();
+
+    confirmSpy.mockRestore();
+  });
+
+  it("does not delete a run when the user cancels the confirmation", async () => {
+    api.listRuns.mockResolvedValue({ count: 1, runs: [RUN] });
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    render(<Workspace onOpenRun={vi.fn()} />);
+    await user.click(await screen.findByRole("button", { name: /Delete customers.csv/i }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(api.deleteRun).not.toHaveBeenCalled();
+
+    confirmSpy.mockRestore();
   });
 
   it("compares selected runs", async () => {

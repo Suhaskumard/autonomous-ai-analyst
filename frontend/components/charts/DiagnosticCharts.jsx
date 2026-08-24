@@ -148,7 +148,9 @@ export function CorrelationHeatmap({ data }) {
               <th className="matrix-corner" />
               {columns.map((column) => (
                 <th key={column} scope="col" className="matrix-head" style={{ width: cell }}>
-                  <span className="matrix-head-rotated">{column}</span>
+                  <span className="matrix-head-rotated" title={column}>
+                    {column}
+                  </span>
                 </th>
               ))}
             </tr>

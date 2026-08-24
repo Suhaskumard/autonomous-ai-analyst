@@ -273,7 +273,9 @@ describe("profile -> train -> dashboard", () => {
 
     expect((await screen.findAllByText(/Training models/i)).length).toBeGreaterThan(0);
     expect(await screen.findByText(/Model beats the naive baseline/i)).toBeInTheDocument();
-    expect(screen.getByText("RandomForest")).toBeInTheDocument();
+    // Displayed humanized ("Random Forest") so the stat card wraps at a word
+    // boundary instead of splitting the bare class name mid-word.
+    expect(screen.getByText("Random Forest")).toBeInTheDocument();
   });
 
   it("labels a rejected target as a target problem, not a crash", async () => {

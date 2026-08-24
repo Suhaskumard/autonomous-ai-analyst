@@ -35,8 +35,20 @@ export default function SharedRunPage({ token }) {
   }, [token]);
 
   return (
-    <div className="app-shell">
-      <ThemeToggle />
+    <>
+      <div className="topbar">
+        <div className="topbar-brand">
+          <span className="topbar-mark">
+            <Eye size={17} />
+          </span>
+          Autonomous AI Analyst
+        </div>
+        <div className="topbar-actions">
+          <ThemeToggle />
+        </div>
+      </div>
+
+      <div className="app-shell">
       <header className="header fade-in">
         <h1 className="title" style={{ fontSize: "clamp(1.8rem, 4vw, 2.6rem)", display: "flex", alignItems: "center", justifyContent: "center", gap: 12 }}>
           <Eye size={30} style={{ color: "var(--primary)" }} />
@@ -74,6 +86,7 @@ export default function SharedRunPage({ token }) {
           </Suspense>
         </ErrorBoundary>
       )}
-    </div>
+      </div>
+    </>
   );
 }

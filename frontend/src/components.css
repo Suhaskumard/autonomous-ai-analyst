@@ -90,6 +90,18 @@
   padding: 20px 22px 14px;
   backdrop-filter: blur(12px);
   margin-bottom: 24px;
+  transition: border-color 0.25s ease, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* A grid item's min-width defaults to `auto` — the width its content needs
+     — which overrides the nested `.matrix-scroll { overflow: auto }` and lets
+     a wide confusion-matrix/correlation table push this card past its grid
+     track and off the edge of a narrow (mobile) viewport. min-width: 0 lets
+     the inner scroll container do its job instead. */
+  min-width: 0;
+}
+
+.chart-frame:hover {
+  border-color: var(--border-active);
+  transform: translateY(-2px);
 }
 
 .chart-frame-head {
@@ -181,6 +193,16 @@
   padding: 8px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   color: var(--text-secondary);
+}
+
+.workspace-table tbody tr,
+.profile-table tbody tr {
+  transition: background 0.15s ease;
+}
+
+.workspace-table tbody tr:hover,
+.profile-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 /* --- matrices (confusion + correlation) --- */

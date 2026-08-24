@@ -113,7 +113,13 @@ export default function Workspace({ onOpenRun, activeRunKey, authStatus }) {
     }
   };
 
-  const handleDelete = async (runKey) => {
+  const handleDelete = async (runKey, label) => {
+    // Deletion takes the model and every artifact with it — nothing here is
+    // recoverable afterward, so the trash icon needs a deliberate second
+    // click, not just a steady hand near a small target in a dense row.
+    if (!window.confirm(`Delete ${label || "this run"}? This removes its model and artifacts and cannot be undone.`)) {
+      return;
+    }
     setBusyKey(runKey);
     setError("");
     try {
@@ -248,7 +254,7 @@ export default function Workspace({ onOpenRun, activeRunKey, authStatus }) {
                       <button
                         type="button"
                         className="btn btn-danger btn-compact"
-                        onClick={() => handleDelete(run.run_key)}
+                        onClick={() => handleDelete(run.run_key, run.filename || run.run_key)}
                         disabled={busyKey === run.run_key}
                         aria-label={`Delete ${run.filename || run.run_key}`}
                       >
