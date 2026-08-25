@@ -11,8 +11,12 @@ server {
 
     # Same-origin API. With this proxy the browser never makes a cross-origin
     # request, so CORS is not in play for the containerised deployment.
+    # BACKEND_INTERNAL_URL defaults to the docker-compose service name; the
+    # nginx image's entrypoint runs envsubst over this file at container start
+    # (it's under /etc/nginx/templates/), so a platform without compose's
+    # `backend` DNS name (e.g. Render) can point this at its own service.
     location /api/ {
-        proxy_pass http://backend:8000/api/;
+        proxy_pass ${BACKEND_INTERNAL_URL}/api/;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;

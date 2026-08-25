@@ -1,0 +1,66 @@
+# Render Blueprint for the Autonomous AI Analyst.
+#
+# Deploy: push this repo to GitHub, then in the Render dashboard choose
+# New -> Blueprint and point it at the repo. Render reads this file and
+# provisions everything below in one go. You'll be prompted in the dashboard
+# for the one secret that isn't safe to check in: GEMINI_API_KEY.
+#
+# This wires up the minimal viable production shape from docs/production.md:
+# a managed Postgres database, and inline job processing / local disk storage
+# instead of the Redis queue and S3 profiles (those need extra services this
+# blueprint doesn't provision — see docs/production.md to add them later).
+#
+# Free plan note: Render's free web services have no attached disk, so
+# uploaded datasets and trained models do not survive a restart or redeploy.
+# The `starter` plan below is what makes the backend's disk (and therefore
+# persistence) actually work; downgrade only if you're just kicking the tires.
+
+databases:
+  - name: autonomous-ai-analyst-db
+    databaseName: analyst
+    user: analyst
+    plan: starter
+
+services:
+  - type: web
+    name: autonomous-ai-analyst-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /healthz
+    disk:
+      name: analyst-models
+      mountPath: /app/models
+      sizeGB: 1
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ARTIFACT_SIGNING_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: autonomous-ai-analyst-db
+          property: connectionString
+      - key: CORS_ALLOW_ORIGINS
+        value: https://autonomous-ai-analyst-frontend.onrender.com
+      - key: QUEUE_BACKEND
+        value: inline
+      - key: STORAGE_BACKEND
+        value: local
+      - key: LOG_JSON
+        value: "true"
+
+  - type: web
+    name: autonomous-ai-analyst-frontend
+    runtime: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    plan: starter
+    envVars:
+      # Render gives every service in the same account an internal hostname
+      # equal to its `name` above, reachable from other services on a
+      # private network — the same role docker-compose's `backend` DNS
+      # name plays locally (see frontend/nginx.conf.template).
+      - key: BACKEND_INTERNAL_URL
+        value: http://autonomous-ai-analyst-backend:8000

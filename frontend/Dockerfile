@@ -14,7 +14,11 @@ RUN npm run build
 
 FROM nginx:1.29-alpine AS runtime
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Templated so BACKEND_INTERNAL_URL can differ per platform; the nginx
+# entrypoint envsubst's this into conf.d/ at container start. Default matches
+# the docker-compose service name so `docker compose up` needs no override.
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+ENV BACKEND_INTERNAL_URL=http://backend:8000
 EXPOSE 80
 # 127.0.0.1, not localhost: nginx.conf says `listen 80;`, which binds IPv4 only,
 # while busybox wget resolves localhost to ::1 first and gets connection refused.
